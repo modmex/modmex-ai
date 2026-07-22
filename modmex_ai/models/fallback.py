@@ -8,7 +8,7 @@ from modmex_ai.models.request import ModelRequest
 from modmex_ai.models.response import ModelResponse
 
 
-class FallbackModel:
+class FallbackModel(ModelClient):
     def __init__(self, models: Iterable[ModelClient], *, name: str = "fallback") -> None:
         self.models = list(models)
         if not self.models:
@@ -28,4 +28,3 @@ class FallbackModel:
 
     def stream(self, request: ModelRequest):
         return self.models[0].stream(request)
-
