@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+from modmex_ai.models.base import ModelClient
 from modmex_ai.models.profile import ModelProfile
 from modmex_ai.models.request import ModelRequest
 from modmex_ai.models.response import ModelResponse
 
 
-class FakeModel:
+class FakeModel(ModelClient):
     def __init__(
         self,
         responses: Iterable[ModelResponse | str],

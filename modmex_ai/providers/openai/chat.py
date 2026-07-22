@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import asyncio
 
-from modmex_ai.http import AsyncHttpClient, HttpClient, parse_sse_lines
-from modmex_ai.models import ModelRequest, ModelResponse
-from modmex_ai.providers.openai.mapper import chat_stream_events, from_chat_payload, to_chat_payload
+from modmex_ai.http import AsyncHttpClient, HttpClient, parse_sse_lines, parse_sse_lines_async
+from modmex_ai.models import AsyncModelClient, ModelRequest, ModelResponse
+from modmex_ai.providers.openai.mapper import (
+    chat_stream_events,
+    chat_stream_events_async,
+    from_chat_payload,
+    to_chat_payload,
+)
 from modmex_ai.providers.openai.profile import OPENAI_CHAT_PROFILE
 
 
-class OpenAIChatModel:
+class OpenAIChatModel(AsyncModelClient):
     def __init__(
         self,
         model: str,
@@ -82,5 +87,36 @@ class OpenAIChatModel:
             model=self.model,
         )
 
+    async def astream(self, request: ModelRequest):
+        payload = to_chat_payload(request, self.model)
+        payload["stream"] = True
+        if self.async_http_client is not None:
+            async for event in chat_stream_events_async(
+                parse_sse_lines_async(self.async_http_client.post_json_stream(
+                    f"{self.base_url}/chat/completions",
+                    headers=self._headers(),
+                    data=payload,
+                    timeout=request.settings.timeout if request.settings else None,
+                )),
+                headers={},
+                status_code=200,
+                model=self.model,
+            ):
+                yield event
+            return
+        iterator = self.stream(request)
+        while True:
+            has_event, event = await asyncio.to_thread(_next_event, iterator)
+            if not has_event:
+                return
+            yield event
+
     def _headers(self) -> dict[str, str]:
         return {"authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+
+
+def _next_event(iterator):
+    try:
+        return True, next(iterator)
+    except StopIteration:
+        return False, None

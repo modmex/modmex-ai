@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import asyncio
 
-from modmex_ai.http import AsyncHttpClient, HttpClient, parse_sse_lines
-from modmex_ai.models import ModelRequest, ModelResponse
-from modmex_ai.providers.openai.mapper import from_responses_payload, responses_stream_events, to_responses_payload
+from modmex_ai.http import AsyncHttpClient, HttpClient, parse_sse_lines, parse_sse_lines_async
+from modmex_ai.models import AsyncModelClient, ModelRequest, ModelResponse
+from modmex_ai.providers.openai.mapper import (
+    from_responses_payload,
+    responses_stream_events,
+    responses_stream_events_async,
+    to_responses_payload,
+)
 from modmex_ai.providers.openai.profile import OPENAI_RESPONSES_PROFILE
 
 
-class OpenAIResponsesModel:
+class OpenAIResponsesModel(AsyncModelClient):
     def __init__(
         self,
         model: str,
@@ -88,6 +93,30 @@ class OpenAIResponsesModel:
             model=self.model,
         )
 
+    async def astream(self, request: ModelRequest):
+        payload = to_responses_payload(request, self.model)
+        payload["stream"] = True
+        if self.async_http_client is not None:
+            async for event in responses_stream_events_async(
+                parse_sse_lines_async(self.async_http_client.post_json_stream(
+                    f"{self.base_url}/responses",
+                    headers=self._headers(),
+                    data=payload,
+                    timeout=request.settings.timeout if request.settings else None,
+                )),
+                headers={},
+                status_code=200,
+                model=self.model,
+            ):
+                yield event
+            return
+        iterator = self.stream(request)
+        while True:
+            has_event, event = await asyncio.to_thread(_next_event, iterator)
+            if not has_event:
+                return
+            yield event
+
     def _headers(self) -> dict[str, str]:
         headers = {}
         if self.api_key:
@@ -97,3 +126,10 @@ class OpenAIResponsesModel:
         if self.project:
             headers["OpenAI-Project"] = self.project
         return headers
+
+
+def _next_event(iterator):
+    try:
+        return True, next(iterator)
+    except StopIteration:
+        return False, None

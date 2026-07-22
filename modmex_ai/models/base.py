@@ -6,6 +6,7 @@ from typing import Protocol
 from modmex_ai.models.profile import ModelProfile
 from modmex_ai.models.request import ModelRequest
 from modmex_ai.models.response import ModelResponse
+from modmex_ai.models.stream import ModelStreamEvent
 
 
 class ModelClient(Protocol):
@@ -25,5 +26,8 @@ class AsyncModelClient(ModelClient, Protocol):
     async def acomplete(self, request: ModelRequest) -> ModelResponse:
         ...
 
-    def astream(self, request: ModelRequest) -> AsyncIterator[ModelResponse]:
+    def astream(
+        self,
+        request: ModelRequest,
+    ) -> AsyncIterator[ModelStreamEvent | ModelResponse]:
         ...

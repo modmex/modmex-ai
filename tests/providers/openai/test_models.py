@@ -170,3 +170,49 @@ def test_openai_models_translate_sse_streams():
     assert chat_events[-1].response.output_text == "Hi"
     assert responses_events[0].type == ModelStreamEventType.TEXT_DELTA
     assert responses_events[-1].response.output_text == "Hi"
+
+
+def test_openai_models_translate_sse_streams_asynchronously():
+    class AsyncStreamHttp:
+        def __init__(self, chunks):
+            self.chunks = chunks
+            self.calls = []
+
+        async def post_json_stream(self, url, *, headers=None, data=None, timeout=None):
+            self.calls.append((url, headers, data, timeout))
+            for chunk in self.chunks:
+                yield chunk
+
+    async def collect():
+        chat_http = AsyncStreamHttp([
+            b'data: {"choices":[{"delta":{"content":"Hi"}}]}\n\n',
+            b'data: [DONE]\n\n',
+        ])
+        responses_http = AsyncStreamHttp([
+            b'data: {"type":"response.output_text.delta","delta":"Hi"}\n\n',
+            b'data: {"type":"response.completed","response":{"id":"resp-1","output":[{"type":"message","content":[{"type":"output_text","text":"Hi"}]}]}}\n\n',
+        ])
+        chat_events = [
+            event
+            async for event in OpenAIChatModel(
+                "gpt-test",
+                async_http_client=chat_http,
+            ).astream(ModelRequest(messages=[]))
+        ]
+        responses_events = [
+            event
+            async for event in OpenAIResponsesModel(
+                "gpt-test",
+                async_http_client=responses_http,
+            ).astream(ModelRequest(messages=[]))
+        ]
+        return chat_http, responses_http, chat_events, responses_events
+
+    chat_http, responses_http, chat_events, responses_events = asyncio.run(collect())
+
+    assert chat_http.calls[0][2]["stream"] is True
+    assert responses_http.calls[0][2]["stream"] is True
+    assert chat_events[0].type == ModelStreamEventType.TEXT_DELTA
+    assert chat_events[-1].response.output_text == "Hi"
+    assert responses_events[0].type == ModelStreamEventType.TEXT_DELTA
+    assert responses_events[-1].response.output_text == "Hi"
