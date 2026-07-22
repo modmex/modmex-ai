@@ -2,13 +2,13 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import field
-from enum import StrEnum
+from enum import Enum
 from typing import Any
 
 from modmex import BaseModel
 
 
-class ApprovalDecisionType(StrEnum):
+class ApprovalDecisionType(str, Enum):
     APPROVED = "approved"
     REJECTED = "rejected"
 

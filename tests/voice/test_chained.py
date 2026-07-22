@@ -296,7 +296,7 @@ def test_chained_voice_session_records_timeout_and_stage_metrics():
 
         try:
             await session.process_audio(b"caller-audio")
-        except TimeoutError:
+        except asyncio.TimeoutError:
             pass
         else:
             raise AssertionError("Expected turn timeout")

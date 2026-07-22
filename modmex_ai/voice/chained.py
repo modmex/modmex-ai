@@ -90,7 +90,7 @@ class ChainedVoiceSession(VoiceAgentSession):
         except VoiceTurnCancelled:
             self._finish_turn(VoiceTurnReason.CANCELLED)
             raise
-        except TimeoutError:
+        except asyncio.TimeoutError:
             self._finish_turn(VoiceTurnReason.TIMED_OUT)
             raise
         except Exception:
@@ -210,7 +210,7 @@ class ChainedVoiceSession(VoiceAgentSession):
         except VoiceTurnCancelled:
             self._finish_turn(VoiceTurnReason.CANCELLED)
             raise
-        except TimeoutError:
+        except asyncio.TimeoutError:
             self._finish_turn(VoiceTurnReason.TIMED_OUT)
             raise
         except Exception:

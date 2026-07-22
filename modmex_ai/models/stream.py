@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from enum import StrEnum
+from enum import Enum
 from typing import Any
 
 from modmex import BaseModel
@@ -8,7 +8,7 @@ from modmex import BaseModel
 from modmex_ai.models.response import ModelResponse, ToolCall
 
 
-class ModelStreamEventType(StrEnum):
+class ModelStreamEventType(str, Enum):
     TEXT_DELTA = "text_delta"
     TOOL_CALL_DELTA = "tool_call_delta"
     COMPLETED = "completed"

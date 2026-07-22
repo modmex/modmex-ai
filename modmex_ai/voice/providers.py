@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Awaitable, Callable
-from enum import StrEnum
+from enum import Enum
 
 from modmex import BaseModel
 
@@ -74,7 +74,7 @@ class LiveSpeechToTextProvider(StreamingSpeechToTextProvider):
         """Open and configure the provider connection once per conversation."""
 
 
-class VoiceInputEventType(StrEnum):
+class VoiceInputEventType(str, Enum):
     AUDIO = "audio"
     COMMIT_TURN = "commit_turn"
 

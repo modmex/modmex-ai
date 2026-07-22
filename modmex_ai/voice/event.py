@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import field
-from enum import StrEnum
+from enum import Enum
 from typing import Any
 
 from modmex import BaseModel
 
 
-class VoiceSessionEventType(StrEnum):
+class VoiceSessionEventType(str, Enum):
     SESSION_STARTED = "session_started"
     TRANSCRIPT_DELTA = "transcript_delta"
     TRANSCRIPT_FINAL = "transcript_final"
@@ -19,7 +19,7 @@ class VoiceSessionEventType(StrEnum):
     ERROR = "error"
 
 
-class VoiceTerminationReason(StrEnum):
+class VoiceTerminationReason(str, Enum):
     COMPLETED = "completed"
     ENDED_BY_CALLER = "ended_by_caller"
     ENDED_BY_APPLICATION = "ended_by_application"

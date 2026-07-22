@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import field
-from enum import StrEnum
+from enum import Enum
 from typing import Any
 
 from modmex import BaseModel
@@ -10,7 +10,7 @@ from modmex_ai.agents.result import AgentResult
 from modmex_ai.models import ToolCall
 
 
-class AgentStreamEventType(StrEnum):
+class AgentStreamEventType(str, Enum):
     TEXT_DELTA = "text_delta"
     TOOL_CALL_DELTA = "tool_call_delta"
     TOOL_FINISHED = "tool_finished"
