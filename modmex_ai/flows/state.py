@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import field
-from enum import StrEnum
+from enum import Enum
 from typing import Any
 
 from modmex import BaseModel
@@ -13,7 +13,7 @@ from modmex_ai.models import ProviderState, ToolCall
 from modmex_ai.sessions import SessionSnapshot
 
 
-class FlowStateStatus(StrEnum):
+class FlowStateStatus(str, Enum):
     ACTIVE = "active"
     SUSPENDED = "suspended"
     COMPLETED = "completed"

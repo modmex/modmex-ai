@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from enum import StrEnum
+from enum import Enum
 
 from modmex import BaseModel
 
@@ -8,7 +8,7 @@ from modmex_ai.agents import AgentStreamEvent
 from modmex_ai.flows.result import FlowResult
 
 
-class FlowStreamEventType(StrEnum):
+class FlowStreamEventType(str, Enum):
     AGENT = "agent"
     COMPLETED = "completed"
 

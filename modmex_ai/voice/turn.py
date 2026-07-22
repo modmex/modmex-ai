@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from enum import StrEnum
+from enum import Enum
 from typing import Protocol
 
 from modmex import BaseModel
@@ -14,7 +14,7 @@ class VoiceTurnOptions(BaseModel):
     timeout_seconds: float | None = None
 
 
-class VoiceTurnReason(StrEnum):
+class VoiceTurnReason(str, Enum):
     COMPLETED = "completed"
     CANCELLED = "cancelled"
     TIMED_OUT = "timed_out"
