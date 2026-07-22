@@ -90,8 +90,21 @@ requested, a Flow raises `FlowSuspended` with the exact pending tool call and
 a serializable checkpoint. Persist it, collect the signed approval in the
 host, then resume the Flow without asking the model to decide again.
 
-`modmex-lambda` includes optional DynamoDB store adapters for Lambda-oriented
-hosts. Other applications can implement the same `DurableSessionStore` and
+For Lambda-oriented hosts, install the optional connector integration and use
+the DynamoDB stores from `modmex-ai`:
+
+```bash
+pip install 'modmex-ai[lambda]'
+```
+
+```python
+from modmex_ai.persistence import DynamoDbDurableSessionStore
+from modmex_lambda.connectors.dynamodb import Connector
+
+store = DynamoDbDurableSessionStore(Connector("sessions-table"))
+```
+
+Other applications can implement the same `DurableSessionStore` and
 `FlowStateStore` contracts with Postgres, Redis, or their existing storage.
 
 ## Realtime voice sessions

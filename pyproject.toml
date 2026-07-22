@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "modmex-ai"
-version = "0.1.1"
+version = "0.1.2"
 description = "Lightweight AI flows, agents, tools, and model adapters for event-driven Python systems."
 readme = "README.md"
 requires-python = ">=3.10,<4.0"
@@ -23,6 +23,7 @@ dependencies = [
 
 [project.optional-dependencies]
 aws = ["boto3>=1.24.66,<2.0.0"]
+lambda = ["modmex-lambda>=0.5.10,<1.0.0"]
 realtime = ["websockets>=15.0,<16.0"]
 async = ["httpx>=0.27,<1.0"]
 
