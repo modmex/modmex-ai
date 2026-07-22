@@ -1,3 +1,4 @@
+from dataclasses import field
 from typing import Literal
 
 from modmex import BaseModel
@@ -67,6 +68,14 @@ class NullableOutput(BaseModel):
     follow_up_note: str | None = None
 
 
+class StrictNestedOutput(BaseModel):
+    notes: list[str] = field(default_factory=list)
+
+
+class StrictOutput(BaseModel):
+    nested: StrictNestedOutput | None = None
+
+
 def test_openai_responses_mapper_includes_tools_and_schema():
     request = ModelRequest(
         messages=[
@@ -123,6 +132,8 @@ def test_openai_mapper_normalizes_strict_tool_schemas():
     assert chat_payload["tools"][0]["function"]["parameters"] == (
         responses_payload["tools"][0]["parameters"]
     )
+    assert responses_payload["tools"][0]["strict"] is True
+    assert chat_payload["tools"][0]["function"]["strict"] is True
 
 
 def test_openai_response_parsers_extract_tool_calls_and_text():
@@ -208,7 +219,6 @@ def test_openai_mapper_handles_tool_messages_settings_and_tool_calls():
             temperature=0.1,
             top_p=0.9,
             max_tokens=12,
-            extra={"parallel_tool_calls": False},
         ),
     )
 
@@ -219,9 +229,29 @@ def test_openai_mapper_handles_tool_messages_settings_and_tool_calls():
     assert responses_payload["temperature"] == 0.1
     assert responses_payload["top_p"] == 0.9
     assert responses_payload["max_output_tokens"] == 12
-    assert responses_payload["parallel_tool_calls"] is False
+    assert chat_payload["max_completion_tokens"] == 12
+    assert "max_output_tokens" not in chat_payload
     assert chat_payload["tools"][0]["function"]["name"] == "lookup"
     assert chat_payload["messages"][1]["tool_call_id"] == "call-1"
+
+
+def test_responses_tool_output_is_always_serialized_as_text():
+    payload = to_responses_payload(
+        ModelRequest(messages=[
+            Message(
+                role="tool",
+                content=[{"type": "output_text", "text": "done"}],
+                tool_call_id="call-1",
+            ),
+        ]),
+        "gpt-test",
+    )
+
+    assert payload["input"] == [{
+        "type": "function_call_output",
+        "call_id": "call-1",
+        "output": '[{"type":"output_text","text":"done"}]',
+    }]
 
 
 def test_openai_mapper_includes_function_call_before_tool_output():
@@ -378,9 +408,49 @@ def test_openai_payload_preserves_optional_fields_when_output_is_not_strict():
     assert payload["text"]["format"]["strict"] is False
     assert schema["required"] == ["intent"]
     assert schema["properties"]["follow_up_note"] == {
-        "type": "string",
-        "nullable": True,
+        "type": ["string", "null"],
+        "default": None,
     }
+
+
+def test_openai_strict_schema_normalizes_optional_default_factories_in_definitions():
+    strict = to_openai_strict_schema(schema_for_model(StrictOutput))
+
+    assert strict["properties"]["nested"] == {
+        "anyOf": [
+            {"$ref": "#/$defs/StrictNestedOutput"},
+            {"type": "null"},
+        ],
+    }
+    assert strict["required"] == ["nested"]
+    nested = strict["$defs"]["StrictNestedOutput"]
+    assert nested["properties"]["notes"] == {
+        "type": ["array", "null"],
+        "items": {"type": "string"},
+    }
+    assert nested["required"] == ["notes"]
+
+
+def test_openai_text_tools_can_opt_out_of_strict_mode():
+    request = ModelRequest(
+        messages=[Message(role="user", content="hello")],
+        tool_strict=False,
+        tools=[{
+            "name": "record",
+            "description": "",
+            "parameters": {
+                "type": "object",
+                "properties": {"note": {"type": ["string", "null"]}},
+                "required": [],
+                "additionalProperties": False,
+            },
+        }],
+    )
+
+    assert to_responses_payload(request, "gpt-test")["tools"][0]["strict"] is False
+    chat_tool = to_chat_payload(request, "gpt-test")["tools"][0]["function"]
+    assert chat_tool["strict"] is False
+    assert chat_tool["parameters"]["required"] == []
 
 
 def test_openai_mapper_normalizes_nested_schema_provider_state_and_incomplete_stream():
@@ -392,8 +462,8 @@ def test_openai_mapper_normalizes_nested_schema_provider_state_and_incomplete_st
     assert schema["required"] == ["items"]
     assert schema["properties"]["items"]["items"]["type"] == ["string", "null"]
     payload = {}
-    _apply_provider_state(payload, ProviderState(provider="openai", previous_response_id="r", conversation_id="c", values={"x": 1}))
-    assert payload == {"previous_response_id": "r", "conversation": "c", "x": 1}
+    _apply_provider_state(payload, ProviderState(provider="openai", previous_response_id="r", conversation_id="c"))
+    assert payload == {"previous_response_id": "r", "conversation": "c"}
     assert _input_items_for_provider_state([{"role": "user"}, {"type": "function_call_output"}], ProviderState(previous_response_id="r")) == [{"type": "function_call_output"}]
     assert _provider_state_from_response({"conversation": {"id": "c"}}).conversation_id == "c"
     events = list(responses_stream_events([

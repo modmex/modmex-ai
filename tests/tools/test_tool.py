@@ -20,6 +20,8 @@ def test_tool_schema_is_inferred_from_signature():
     assert schema["name"] == "search"
     assert schema["parameters"]["properties"]["term"]["type"] == "string"
     assert schema["parameters"]["properties"]["limit"]["type"] == "integer"
+    assert schema["parameters"]["required"] == ["term"]
+    assert "strict" not in schema
 
 
 def test_tool_executor_rejects_unknown_tool():
@@ -44,6 +46,7 @@ def test_tool_accepts_string_arguments_and_defaults():
         return [term] * limit
 
     assert search.run('{"term":"x"}') == ["x", "x"]
+    assert search.run({"term": "x", "limit": None}) == ["x", "x"]
 
 
 def test_tool_injects_context_and_ctx_parameters():
@@ -65,6 +68,28 @@ def test_tool_schema_skips_context_parameters():
         return value
 
     assert "context" not in with_context.schema()["parameters"]["properties"]
+
+
+def test_tool_schema_hoists_modmex_model_definitions_to_parameters_root():
+    class Address(BaseModel):
+        city: str
+
+    class Carrier(BaseModel):
+        address: Address
+
+    @tool
+    def register_carrier(carrier: Carrier) -> str:
+        return carrier.address.city
+
+    parameters = register_carrier.schema()["parameters"]
+
+    assert "$defs" not in parameters["properties"]["carrier"]
+    assert parameters["properties"]["carrier"]["properties"]["address"] == {
+        "$ref": "#/$defs/Address",
+    }
+    assert parameters["$defs"]["Address"]["properties"]["city"] == {
+        "type": "string",
+    }
 
 
 def test_tool_decorator_accepts_options():

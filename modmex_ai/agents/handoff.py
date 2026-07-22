@@ -80,7 +80,6 @@ class Handoff:
             "name": self.name,
             "description": self.description,
             "parameters": parameters,
-            "strict": True,
         }
 
     def parse_input(self, value: Any) -> Any:

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "modmex-ai"
-version = "0.1.2"
+version = "0.1.3"
 description = "Lightweight AI flows, agents, tools, and model adapters for event-driven Python systems."
 readme = "README.md"
 requires-python = ">=3.10,<4.0"
@@ -18,7 +18,7 @@ classifiers = [
 license = { text = "MIT" }
 authors = [{ name = "Modmex" }]
 dependencies = [
-    "modmex (>=1.1.15,<2.0.0)"
+    "modmex (>=1.2.0,<2.0.0)"
 ]
 
 [project.optional-dependencies]

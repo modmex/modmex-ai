@@ -4,6 +4,7 @@ from modmex_ai.providers.openai.realtime import (
     OpenAIRealtimeClient,
     OpenAIRealtimeSession,
     OpenAIRealtimeSessionConfig,
+    OpenAIServerVadConfig,
 )
 from modmex_ai.providers.openai.responses import OpenAIResponsesModel
 from modmex_ai.providers.openai.transcription import (
@@ -19,6 +20,7 @@ __all__ = [
     "OpenAIRealtimeClient",
     "OpenAIRealtimeSession",
     "OpenAIRealtimeSessionConfig",
+    "OpenAIServerVadConfig",
     "OpenAIResponsesModel",
     "OpenAIRealtimeTranscriptionConfig",
     "OpenAIRealtimeTranscriptionProvider",

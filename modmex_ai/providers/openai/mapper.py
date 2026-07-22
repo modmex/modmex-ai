@@ -34,7 +34,8 @@ def to_responses_payload(request: ModelRequest, model: str) -> dict[str, Any]:
             {
                 "type": "function",
                 **tool,
-                "parameters": to_openai_strict_schema(tool["parameters"]),
+                "parameters": _tool_parameters(request, tool),
+                "strict": request.tool_strict,
             }
             for tool in request.tools
         ]
@@ -52,7 +53,7 @@ def to_responses_payload(request: ModelRequest, model: str) -> dict[str, Any]:
                 "schema": schema,
             }
         }
-    _apply_settings(payload, request)
+    _apply_responses_settings(payload, request)
     return payload
 
 
@@ -97,7 +98,8 @@ def to_chat_payload(request: ModelRequest, model: str) -> dict[str, Any]:
                 "type": "function",
                 "function": {
                     **tool,
-                    "parameters": to_openai_strict_schema(tool["parameters"]),
+                    "parameters": _tool_parameters(request, tool),
+                    "strict": request.tool_strict,
                 },
             }
             for tool in request.tools
@@ -116,7 +118,7 @@ def to_chat_payload(request: ModelRequest, model: str) -> dict[str, Any]:
                 "schema": schema,
             },
         }
-    _apply_settings(payload, request)
+    _apply_chat_settings(payload, request)
     return payload
 
 
@@ -372,6 +374,15 @@ def tool_results_to_responses_input(tool_results: list[dict[str, Any]]) -> list[
     ]
 
 
+def _tool_parameters(request: ModelRequest, tool: dict[str, Any]) -> dict[str, Any]:
+    parameters = tool["parameters"]
+    return (
+        to_openai_strict_schema(parameters)
+        if request.tool_strict
+        else deepcopy(parameters)
+    )
+
+
 def to_openai_strict_schema(schema: dict[str, Any]) -> dict[str, Any]:
     """Lower a generic JSON Schema into OpenAI strict structured-output shape."""
     return _normalize_schema(deepcopy(schema))
@@ -381,14 +392,19 @@ def _normalize_schema(schema: Any) -> Any:
     if not isinstance(schema, dict):
         return schema
 
+    schema.pop("default", None)
     nullable = schema.pop("nullable", False)
     if nullable and "type" in schema:
         schema["type"] = _nullable_type(schema["type"])
 
     if schema.get("type") == "object":
         properties = schema.get("properties") or {}
+        natural_required = set(schema.get("required") or [])
         schema["properties"] = {
-            name: _normalize_schema(value)
+            name: _strict_property_schema(
+                _normalize_schema(value),
+                required=name in natural_required,
+            )
             for name, value in properties.items()
         }
         schema["required"] = list(schema["properties"].keys())
@@ -401,6 +417,12 @@ def _normalize_schema(schema: Any) -> Any:
         if keyword in schema:
             schema[keyword] = [_normalize_schema(item) for item in schema[keyword]]
 
+    if "$defs" in schema:
+        schema["$defs"] = {
+            name: _normalize_schema(definition)
+            for name, definition in schema["$defs"].items()
+        }
+
     return schema
 
 
@@ -410,6 +432,19 @@ def _nullable_type(value: Any) -> Any:
     return [value, "null"]
 
 
+def _strict_property_schema(schema: dict[str, Any], *, required: bool) -> dict[str, Any]:
+    if required:
+        return schema
+    if "type" in schema:
+        schema["type"] = _nullable_type(schema["type"])
+        return schema
+    if "anyOf" in schema:
+        if not any(item == {"type": "null"} for item in schema["anyOf"]):
+            schema["anyOf"].append({"type": "null"})
+        return schema
+    return {"anyOf": [schema, {"type": "null"}]}
+
+
 def _apply_provider_state(payload: dict[str, Any], state: ProviderState | None) -> None:
     if state is None:
         return
@@ -417,8 +452,6 @@ def _apply_provider_state(payload: dict[str, Any], state: ProviderState | None) 
         payload["previous_response_id"] = state.previous_response_id
     if state.conversation_id:
         payload["conversation"] = state.conversation_id
-    if state.values:
-        payload.update(state.values)
 
 
 def _input_items_for_provider_state(
@@ -468,7 +501,7 @@ def _split_instructions(messages: list[Message | SessionItem]) -> tuple[str | No
                 {
                     "type": "function_call_output",
                     "call_id": message.tool_call_id,
-                    "output": message.content,
+                    "output": _string_payload(message.content),
                 }
             )
             continue
@@ -561,7 +594,7 @@ def _string_payload(value: Any) -> str:
     return dumps(value)
 
 
-def _apply_settings(payload: dict[str, Any], request: ModelRequest) -> None:
+def _apply_responses_settings(payload: dict[str, Any], request: ModelRequest) -> None:
     settings = request.settings
     if not settings:
         return
@@ -571,8 +604,18 @@ def _apply_settings(payload: dict[str, Any], request: ModelRequest) -> None:
         payload["top_p"] = settings.top_p
     if settings.max_tokens is not None:
         payload["max_output_tokens"] = settings.max_tokens
-    if settings.extra:
-        payload.update(settings.extra)
+
+
+def _apply_chat_settings(payload: dict[str, Any], request: ModelRequest) -> None:
+    settings = request.settings
+    if not settings:
+        return
+    if settings.temperature is not None:
+        payload["temperature"] = settings.temperature
+    if settings.top_p is not None:
+        payload["top_p"] = settings.top_p
+    if settings.max_tokens is not None:
+        payload["max_completion_tokens"] = settings.max_tokens
 
 
 def _usage_from_payload(payload: dict[str, Any]) -> Usage:

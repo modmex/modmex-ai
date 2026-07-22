@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import field
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlencode
 
 from modmex import BaseModel
@@ -29,15 +29,35 @@ from modmex_ai.voice import (
 )
 
 
+class OpenAIServerVadConfig(BaseModel):
+    """Standard OpenAI Realtime server-VAD settings."""
+
+    type: Literal["server_vad"] = "server_vad"
+    threshold: float | None = None
+    prefix_padding_ms: int | None = None
+    silence_duration_ms: int | None = None
+    create_response: bool | None = None
+    interrupt_response: bool | None = None
+    idle_timeout_ms: int | None = None
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            key: value
+            for key, value in self.model_dump().items()
+            if value is not None
+        }
+
+
 class OpenAIRealtimeSessionConfig(BaseModel):
     """OpenAI Realtime session fields shared by WebSocket and SIP calls."""
 
     model: str = "gpt-realtime-2.1"
     voice: str | None = None
-    output_modalities: list[str] = field(default_factory=lambda: ["audio"])
-    turn_detection: dict[str, Any] | None = None
-    tool_choice: str = "auto"
-    extra: dict[str, Any] = field(default_factory=dict)
+    output_modalities: list[Literal["audio", "text"]] = field(
+        default_factory=lambda: ["audio"]
+    )
+    turn_detection: OpenAIServerVadConfig | None = None
+    tool_choice: Literal["auto", "none", "required"] = "auto"
 
     def to_accept_payload(self, agent: Agent) -> dict[str, Any]:
         """Build the Realtime Calls accept payload from the active agent."""
@@ -56,7 +76,6 @@ class OpenAIRealtimeSessionConfig(BaseModel):
             "output_modalities": self.output_modalities,
             "tools": [{"type": "function", **tool} for tool in tool_schemas],
             "tool_choice": self.tool_choice,
-            **self.extra,
         }
         if include_model:
             session["model"] = self.model
@@ -64,7 +83,7 @@ class OpenAIRealtimeSessionConfig(BaseModel):
         if self.voice is not None:
             audio["output"] = {"voice": self.voice}
         if self.turn_detection is not None:
-            audio["input"] = {"turn_detection": self.turn_detection}
+            audio["input"] = {"turn_detection": self.turn_detection.to_payload()}
         if audio:
             session["audio"] = audio
         return session
