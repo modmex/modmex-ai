@@ -1,9 +1,10 @@
+from dataclasses import field
 from enum import Enum
 from typing import Any, Literal
 
 from modmex import BaseModel
 
-from modmex_ai.schemas import schema_for_model, schema_for_type
+from modmex_ai.schemas import schema_for_model, schema_for_type, validate_model
 
 
 class Payload(BaseModel):
@@ -47,12 +48,23 @@ def test_schema_for_misc_types():
     assert schema_for_type(dict) == {"type": "object"}
 
 
-def test_schema_for_model_accepts_custom_name_and_skips_private_fields():
-    class PrivatePayload(BaseModel):
-        _private: str
-        public: str
-
-    schema = schema_for_model(PrivatePayload, name="Custom")
+def test_schema_for_model_delegates_to_modmex_and_accepts_custom_name():
+    schema = schema_for_model(Payload, name="Custom")
 
     assert schema["title"] == "Custom"
-    assert "_private" not in schema["properties"]
+    assert schema["properties"] == Payload.model_json_schema()["properties"]
+
+
+def test_validate_model_applies_default_factory_for_strict_null_values():
+    class Nested(BaseModel):
+        tags: list[str] = field(default_factory=list)
+
+    class PayloadWithNestedDefaults(BaseModel):
+        nested: Nested | None = None
+
+    value = validate_model(
+        {"nested": {"tags": None}},
+        PayloadWithNestedDefaults,
+    )
+
+    assert value.nested.tags == []

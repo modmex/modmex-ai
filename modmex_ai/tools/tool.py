@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
-from typing import Any, Callable, get_type_hints
+import types
+from typing import Any, Callable, Union, get_args, get_origin, get_type_hints
 
 from modmex import BaseModel
 
@@ -51,12 +52,15 @@ class Tool:
 
     def schema(self) -> dict[str, Any]:
         parameters = {}
+        required = []
         for name, parameter in self.signature.parameters.items():
             if name in ("self", "context", "ctx"):
                 continue
             annotation = self.type_hints.get(name, parameter.annotation)
             parameters[name] = schema_for_type(annotation)
-        return function_schema(self.name, self.description, parameters)
+            if parameter.default is inspect.Signature.empty:
+                required.append(name)
+        return function_schema(self.name, self.description, parameters, required)
 
     def run(self, arguments: dict[str, Any] | str, *, context: Any = None) -> Any:
         try:
@@ -163,6 +167,13 @@ class Tool:
                 kwargs[name] = parameter.default
                 continue
             annotation = self.type_hints.get(name, parameter.annotation)
+            if (
+                arguments[name] is None
+                and parameter.default is not inspect.Signature.empty
+                and not _accepts_none(annotation)
+            ):
+                kwargs[name] = parameter.default
+                continue
             kwargs[name] = _coerce(arguments[name], annotation)
         return kwargs
 
@@ -213,3 +224,8 @@ def _coerce(value: Any, annotation: Any) -> Any:
         return value
     except Exception as exc:
         raise ToolValidationError(str(exc)) from exc
+
+
+def _accepts_none(annotation: Any) -> bool:
+    origin = get_origin(annotation)
+    return origin in (Union, types.UnionType) and type(None) in get_args(annotation)

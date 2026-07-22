@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import types
+from copy import deepcopy
 from collections.abc import Sequence
 from enum import Enum
 from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
@@ -48,6 +49,12 @@ def schema_for_type(annotation: Any) -> dict[str, Any]:
 
 
 def schema_for_model(model_type: type[Any], *, name: str | None = None) -> dict[str, Any]:
+    if _is_model_type(model_type) and hasattr(model_type, "model_json_schema"):
+        schema = deepcopy(model_type.model_json_schema())
+        if name is not None:
+            schema["title"] = name
+        return schema
+
     properties: dict[str, Any] = {}
     required: list[str] = []
     hints = get_type_hints(model_type)
@@ -67,18 +74,30 @@ def schema_for_model(model_type: type[Any], *, name: str | None = None) -> dict[
     }
 
 
-def function_schema(name: str, description: str, parameters: dict[str, Any]) -> dict[str, Any]:
-    return {
+def function_schema(
+    name: str,
+    description: str,
+    parameters: dict[str, Any],
+    required: list[str],
+) -> dict[str, Any]:
+    """Build a provider-neutral function schema from a Python signature."""
+    definitions: dict[str, Any] = {}
+    schema = {
         "name": name,
         "description": description,
         "parameters": {
             "type": "object",
-            "properties": parameters,
-            "required": list(parameters.keys()),
+            "properties": {
+                parameter_name: _hoist_definitions(parameter_schema, definitions)
+                for parameter_name, parameter_schema in parameters.items()
+            },
+            "required": required,
             "additionalProperties": False,
         },
-        "strict": True,
     }
+    if definitions:
+        schema["parameters"]["$defs"] = definitions
+    return schema
 
 
 def _json_type(annotation: type[Any]) -> str:
@@ -108,3 +127,23 @@ def _accepts_none(annotation: Any) -> bool:
 
 def _is_model_type(annotation: type[Any]) -> bool:
     return issubclass(annotation, BaseModel) or hasattr(annotation, "model_dump") or hasattr(annotation, "to_dict")
+
+
+def _hoist_definitions(schema: Any, definitions: dict[str, Any]) -> Any:
+    if isinstance(schema, list):
+        return [_hoist_definitions(item, definitions) for item in schema]
+    if not isinstance(schema, dict):
+        return schema
+
+    normalized = {
+        key: _hoist_definitions(value, definitions)
+        for key, value in schema.items()
+        if key != "$defs"
+    }
+    for name, definition in schema.get("$defs", {}).items():
+        normalized_definition = _hoist_definitions(definition, definitions)
+        existing = definitions.get(name)
+        if existing is not None and existing != normalized_definition:
+            raise ValueError(f"Conflicting JSON Schema definition: {name}")
+        definitions[name] = normalized_definition
+    return normalized

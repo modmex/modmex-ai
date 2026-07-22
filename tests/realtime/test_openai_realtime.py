@@ -9,6 +9,7 @@ from modmex_ai import Agent, GuardrailResult, Handoff, tool
 from modmex_ai.providers.openai import (
     OpenAIRealtimeSession,
     OpenAIRealtimeSessionConfig,
+    OpenAIServerVadConfig,
 )
 from modmex_ai.providers.openai.realtime import OpenAIRealtimeClient, _usage_from_response
 from modmex_ai.errors import RealtimeConnectionError
@@ -65,7 +66,6 @@ def test_openai_realtime_configures_agent_tools_and_voice():
                 "required": ["order_number"],
                 "additionalProperties": False,
             },
-            "strict": True,
         }]
 
     asyncio.run(run())
@@ -134,6 +134,11 @@ def test_openai_realtime_switches_the_active_agent_after_a_handoff():
             transport=transport,
             config=OpenAIRealtimeSessionConfig(model="gpt-test"),
         )
+        initial_payload = session.config.to_session_update(
+            triage,
+            include_model=True,
+        )
+        assert "strict" not in initial_payload["tools"][0]
 
         await session.handle(await session.receive())
 
@@ -193,7 +198,7 @@ def test_openai_realtime_uses_one_configuration_shape_for_accept_and_session_upd
     config = OpenAIRealtimeSessionConfig(
         model="gpt-test",
         voice="marin",
-        turn_detection={"type": "server_vad"},
+        turn_detection=OpenAIServerVadConfig(),
     )
 
     accept = config.to_accept_payload(agent)
@@ -202,6 +207,26 @@ def test_openai_realtime_uses_one_configuration_shape_for_accept_and_session_upd
     assert accept["model"] == "gpt-test"
     assert "model" not in update
     assert {key: value for key, value in accept.items() if key != "model"} == update
+
+
+def test_openai_realtime_server_vad_omits_unconfigured_fields():
+    config = OpenAIRealtimeSessionConfig(
+        turn_detection=OpenAIServerVadConfig(
+            threshold=0.6,
+            silence_duration_ms=700,
+        ),
+    )
+
+    payload = config.to_session_update(
+        Agent(name="voice", instructions="Help the caller."),
+        include_model=False,
+    )
+
+    assert payload["audio"]["input"]["turn_detection"] == {
+        "type": "server_vad",
+        "threshold": 0.6,
+        "silence_duration_ms": 700,
+    }
 
 
 def test_openai_realtime_normalizes_a_provider_error_as_terminal_voice_events():

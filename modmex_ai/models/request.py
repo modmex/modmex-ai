@@ -15,6 +15,7 @@ class ModelRequest(BaseModel):
     messages: list[Message | SessionItem]
     model: str | None = None
     tools: list[dict[str, Any]] = field(default_factory=list)
+    tool_strict: bool = True
     output_schema: dict[str, Any] | None = None
     output_strict: bool = True
     settings: ModelSettings | None = None
