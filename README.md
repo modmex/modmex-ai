@@ -2,6 +2,12 @@
 
 Lightweight, provider-neutral agents, flows, tools, and voice runtimes for Python.
 
+[![CI](https://img.shields.io/github/actions/workflow/status/modmex/modmex-ai/ci.yml?branch=main&logo=github&label=CI)](https://github.com/modmex/modmex-ai/actions/workflows/ci.yml)
+[![Coverage](https://img.shields.io/codecov/c/github/modmex/modmex-ai?label=coverage)](https://codecov.io/gh/modmex/modmex-ai)
+[![PyPI](https://img.shields.io/pypi/v/modmex-ai.svg)](https://pypi.org/project/modmex-ai/)
+[![Python Versions](https://img.shields.io/pypi/pyversions/modmex-ai.svg)](https://pypi.org/project/modmex-ai/)
+[![License](https://img.shields.io/github/license/modmex/modmex-ai.svg)](https://github.com/modmex/modmex-ai/blob/main/LICENSE)
+
 `modmex-ai` is a small runtime for applications that need an agent to reason,
 call tools, hand off work, and return a controlled result. It fits equally well
 in HTTP APIs, CLIs, background workers, WebSocket servers, notebooks, desktop
@@ -76,6 +82,48 @@ Multi-agent delegation uses handoff function tools, not a field in the model
 output. A handoff defaults to transfer_to_agent_name; its typed input is
 validated and delivered to an on_handoff callback before the next agent
 continues with the conversation.
+
+## Multimodal inputs
+
+Messages can combine typed text, document, and image parts without exposing a
+provider payload in application code. `FileInput` and `ImageInput` accept a
+URL, a provider file id, or inline bytes/Base64 as appropriate. The provider
+adapter decides which source it supports.
+
+The OpenAI Responses adapter maps these parts to the official `input_text`,
+`input_file`, and `input_image` request items. For documents stored privately,
+prefer a short-lived signed URL and create it only for the model request; do
+not persist it in conversation state or publish it in events.
+
+```python
+from modmex_ai import FileInput, InputDetail, Message, TextInput
+from modmex_ai.models import ModelRequest
+from modmex_ai.providers.openai import OpenAIResponsesModel
+
+request = ModelRequest(
+    messages=[
+        Message(
+            role="user",
+            content=[
+                TextInput(text="Extract the organization name and expiration date."),
+                FileInput(
+                    url=presigned_file_url,
+                    filename="agreement.pdf",
+                    media_type="application/pdf",
+                    detail=InputDetail.HIGH,
+                ),
+            ],
+        )
+    ]
+)
+
+response = OpenAIResponsesModel("gpt-5.6", api_key="...").complete(request)
+print(response.output_text)
+```
+
+`OpenAIChatModel` deliberately rejects `FileInput` and `ImageInput` until that
+adapter implements their distinct wire format. Use `OpenAIResponsesModel` for
+multimodal input.
 
 ## Durable sessions and approvals
 
@@ -187,7 +235,7 @@ is preferred when the conversation can hand off to another agent.
 
 ```python
 session = ChainedVoiceSession(
-    flow=carrier_flow,
+    flow=conversation_flow,
     speech_to_text=transcriber,
     text_to_speech=synthesizer,
     context={"workspace_id": "workspace-1"},
@@ -214,7 +262,7 @@ from modmex_ai.providers.openai import (
 )
 
 session = ChainedVoiceSession(
-    flow=carrier_flow,
+    flow=conversation_flow,
     speech_to_text=OpenAITranscriptionProvider(model="gpt-4o-mini-transcribe"),
     text_to_speech=OpenAISpeechProvider(voice="marin", response_format="wav"),
 )
