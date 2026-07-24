@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+from base64 import b64encode
 from copy import deepcopy
 from collections.abc import AsyncIterable, Iterable
 from typing import Any
 
-from modmex_ai.messages import Message
+from modmex_ai.messages import FileInput, ImageInput, Message, TextInput
 from modmex_ai.models import (
     ModelRequest,
     ModelResponse,
@@ -494,7 +495,7 @@ def _split_instructions(messages: list[Message | SessionItem]) -> tuple[str | No
             continue
         message = item
         if message.role in ("system", "developer"):
-            instructions.append(str(message.content))
+            instructions.append(_instructions_payload(message.content))
             continue
         if message.role == "tool":
             input_items.append(
@@ -508,7 +509,7 @@ def _split_instructions(messages: list[Message | SessionItem]) -> tuple[str | No
         input_items.append(
             {
                 "role": message.role,
-                "content": message.content,
+                "content": _responses_content(message.content),
             }
         )
     return "\n\n".join(instructions) if instructions else None, input_items
@@ -529,7 +530,7 @@ def _message_payload(item: Message | SessionItem) -> dict[str, Any]:
             }.items()
             if value is not None
         }
-    return {"role": message.role, "content": message.content}
+    return {"role": message.role, "content": _chat_content(message.content)}
 
 
 def _operation_input_item(item: SessionItem) -> dict[str, Any] | None:
@@ -547,10 +548,7 @@ def _operation_input_item(item: SessionItem) -> dict[str, Any] | None:
             "output": _string_payload(item.output),
         }
     if item.type == "message":
-        return {
-            "role": item.role,
-            "content": item.content,
-        }
+        return _message_input_item(item.to_message())
     return None
 
 
@@ -578,7 +576,7 @@ def _operation_chat_message(item: SessionItem) -> dict[str, Any]:
             "tool_call_id": item.tool_call_id,
         }
     if item.type == "message":
-        return item.to_input()
+        return _message_payload(item.to_message())
     return {"role": "assistant", "content": dumps(item.to_input())}
 
 
@@ -592,6 +590,96 @@ def _string_payload(value: Any) -> str:
     if isinstance(value, str):
         return value
     return dumps(value)
+
+
+def _message_input_item(message: Message) -> dict[str, Any]:
+    if message.role == "tool":
+        return {
+            "type": "function_call_output",
+            "call_id": message.tool_call_id,
+            "output": _string_payload(message.content),
+        }
+    return {
+        "role": message.role,
+        "content": _responses_content(message.content),
+    }
+
+
+def _instructions_payload(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    parts = _content_inputs(content)
+    if any(not isinstance(part, TextInput) for part in parts):
+        raise ValueError("OpenAI Responses instructions support text input only.")
+    return "\n".join(part.text for part in parts)
+
+
+def _responses_content(content: Any) -> list[dict[str, Any]]:
+    if isinstance(content, str):
+        return [{"type": "input_text", "text": content}]
+    return [_responses_content_part(part) for part in _content_inputs(content)]
+
+
+def _responses_content_part(part: TextInput | FileInput | ImageInput) -> dict[str, Any]:
+    if isinstance(part, TextInput):
+        return {"type": "input_text", "text": part.text}
+    if isinstance(part, FileInput):
+        payload: dict[str, Any] = {"type": "input_file"}
+        if part.file_id is not None:
+            payload["file_id"] = part.file_id
+        elif part.url is not None:
+            payload["file_url"] = part.url
+        else:
+            payload["file_data"] = _data_url(part.data or "", part.media_type)
+        if part.filename is not None:
+            payload["filename"] = part.filename
+        if part.detail is not None:
+            payload["detail"] = part.detail.value
+        return payload
+    return {
+        "type": "input_image",
+        "image_url": part.url or _data_url(part.data or "", part.media_type),
+        "detail": part.detail.value,
+    }
+
+
+def _chat_content(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    parts = _content_inputs(content)
+    if any(not isinstance(part, TextInput) for part in parts):
+        raise ValueError(
+            "OpenAI Chat Completions does not support FileInput or ImageInput; use OpenAI Responses."
+        )
+    return "\n".join(part.text for part in parts)
+
+
+def _content_inputs(content: Any) -> list[TextInput | FileInput | ImageInput]:
+    if not isinstance(content, list):
+        raise ValueError("Multimodal message content must be a list of typed input parts.")
+    return [_content_input(part) for part in content]
+
+
+def _content_input(value: Any) -> TextInput | FileInput | ImageInput:
+    if isinstance(value, (TextInput, FileInput, ImageInput)):
+        return value
+    if isinstance(value, dict):
+        part_type = value.get("type")
+        if part_type == "text":
+            return TextInput(**value)
+        if part_type == "file":
+            return FileInput(**value)
+        if part_type == "image":
+            return ImageInput(**value)
+    raise ValueError("Message content parts must be TextInput, FileInput, or ImageInput.")
+
+
+def _data_url(data: str | bytes, media_type: str | None) -> str:
+    if isinstance(data, bytes):
+        data = b64encode(data).decode("ascii")
+    if data.startswith("data:"):
+        return data
+    return f"data:{media_type or 'application/octet-stream'};base64,{data}"
 
 
 def _apply_responses_settings(payload: dict[str, Any], request: ModelRequest) -> None:

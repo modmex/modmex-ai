@@ -1,9 +1,11 @@
 from dataclasses import field
 from typing import Literal
 
+import pytest
+
 from modmex import BaseModel
 
-from modmex_ai.messages import Message
+from modmex_ai.messages import FileInput, ImageInput, InputDetail, Message, TextInput
 from modmex_ai.models import ModelRequest, ModelSettings
 from modmex_ai.providers.openai.mapper import (
     _apply_provider_state,
@@ -98,6 +100,77 @@ def test_openai_responses_mapper_includes_tools_and_schema():
     assert payload["instructions"] == "Be precise."
     assert payload["tools"][0]["type"] == "function"
     assert payload["text"]["format"]["type"] == "json_schema"
+
+
+def test_responses_mapper_translates_neutral_multimodal_inputs_to_official_parts():
+    request = ModelRequest(
+        messages=[
+            Message(
+                role="user",
+                content=[
+                    TextInput(text="Extract the carrier name from this document."),
+                    FileInput(
+                        url="https://files.example/carrier-packet.pdf",
+                        filename="carrier-packet.pdf",
+                        detail=InputDetail.HIGH,
+                    ),
+                    ImageInput(data="YWJj", media_type="image/png", detail=InputDetail.LOW),
+                ],
+            )
+        ]
+    )
+
+    payload = to_responses_payload(request, "gpt-test")
+
+    assert payload["input"] == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "Extract the carrier name from this document."},
+                {
+                    "type": "input_file",
+                    "file_url": "https://files.example/carrier-packet.pdf",
+                    "filename": "carrier-packet.pdf",
+                    "detail": "high",
+                },
+                {
+                    "type": "input_image",
+                    "image_url": "data:image/png;base64,YWJj",
+                    "detail": "low",
+                },
+            ],
+        }
+    ]
+
+
+def test_responses_mapper_supports_provider_file_ids_and_inline_file_data():
+    request = ModelRequest(
+        messages=[
+            Message(
+                role="user",
+                content=[
+                    FileInput(file_id="file-123"),
+                    FileInput(data=b"abc", media_type="application/pdf"),
+                ],
+            )
+        ]
+    )
+
+    payload = to_responses_payload(request, "gpt-test")
+
+    assert payload["input"][0]["content"] == [
+        {"type": "input_file", "file_id": "file-123"},
+        {"type": "input_file", "file_data": "data:application/pdf;base64,YWJj"},
+    ]
+
+
+def test_chat_mapper_rejects_multimodal_content_until_supported_by_that_adapter():
+    request = ModelRequest(
+        messages=[Message(role="user", content=[FileInput(file_id="file-123")])]
+    )
+
+    with pytest.raises(ValueError, match="use OpenAI Responses"):
+        to_chat_payload(request, "gpt-test")
 
 
 def test_openai_mapper_normalizes_strict_tool_schemas():
@@ -308,7 +381,7 @@ def test_openai_mapper_handles_session_message_and_handoff_items():
     chat_payload = to_chat_payload(request, "gpt-test")
 
     assert responses_payload["input"] == [
-        {"role": "user", "content": "hello"},
+        {"role": "user", "content": [{"type": "input_text", "text": "hello"}]},
         {
             "type": "function_call",
             "call_id": "call-1",

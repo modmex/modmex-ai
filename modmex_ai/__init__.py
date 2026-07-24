@@ -25,6 +25,7 @@ from modmex_ai.models import (
     ToolCall,
     Usage,
 )
+from modmex_ai.messages import BinaryData, ContentInput, FileInput, ImageInput, InputDetail, Message, TextInput
 from modmex_ai.sessions import InMemorySession, Session, SessionItem, SessionSnapshot
 from modmex_ai.sessions import DurableSessionStore, InMemoryDurableSessionStore, SessionConflictError
 from modmex_ai.approvals import ApprovalDecision, ApprovalDecisionType, ApprovalPolicy, ApprovalRequest
@@ -69,16 +70,22 @@ from modmex_ai.voice import (
 __all__ = [
     "Agent",
     "AsyncModelClient",
+    "BinaryData",
+    "ContentInput",
     "AgentResult",
     "AgentStreamEvent",
     "AgentStreamEventType",
     "FakeModel",
+    "FileInput",
     "FallbackModel",
     "InMemorySession",
+    "ImageInput",
+    "InputDetail",
     "DurableSessionStore",
     "InMemoryDurableSessionStore",
     "SessionConflictError",
     "ModelClient",
+    "Message",
     "ModelProfile",
     "ModelRequest",
     "ModelResponse",
@@ -133,6 +140,7 @@ __all__ = [
     "StreamingSpeechToTextProvider",
     "StreamingTextToSpeechProvider",
     "TextToSpeechProvider",
+    "TextInput",
     "Transcription",
     "VoiceInputEvent",
     "VoiceInputEventType",
