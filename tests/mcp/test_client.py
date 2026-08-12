@@ -387,6 +387,40 @@ def test_client_rejects_sse_without_correlated_response() -> None:
     asyncio.run(run())
 
 
+def test_client_streams_tool_progress_and_final_result() -> None:
+    async def run() -> None:
+        class ProgressHttp:
+            def post_json_stream(self, url, *, headers=None, data=None, timeout=None):
+                async def chunks():
+                    yield 'event: progress\ndata: {"progress":1,"total":2}\n\n'
+                    yield 'data: {"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","structuredContent":{"status":"done"}}}\n\n'
+                return chunks()
+
+        client = MCPClient("https://example.test/mcp", http=ProgressHttp())
+        events = [event async for event in client.stream_tool_call("long_running")]
+        assert events == [
+            {"kind": "progress", "data": {"progress": 1, "total": 2}},
+            {"kind": "result", "result": {"resultType": "complete", "structuredContent": {"status": "done"}}},
+        ]
+
+    asyncio.run(run())
+
+
+def test_client_stream_tool_call_rejects_unmatched_final_id() -> None:
+    async def run() -> None:
+        class ProgressHttp:
+            def post_json_stream(self, url, *, headers=None, data=None, timeout=None):
+                async def chunks():
+                    yield 'data: {"jsonrpc":"2.0","id":99,"result":{"resultType":"complete"}}\n\n'
+                return chunks()
+
+        client = MCPClient("https://example.test/mcp", http=ProgressHttp())
+        with pytest.raises(MCPError, match="id"):
+            _ = [event async for event in client.stream_tool_call("long_running")]
+
+    asyncio.run(run())
+
+
 def test_client_helpers_handle_header_and_non_json_content() -> None:
     assert _header({"X-Test": "ok"}, "x-test") == "ok"
     assert _header({}, "missing") is None

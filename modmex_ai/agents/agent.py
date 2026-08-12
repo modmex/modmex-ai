@@ -8,7 +8,7 @@ from modmex_ai.agents.context import RunContext
 from modmex_ai.agents.execution import AgentExecution
 from modmex_ai.agents.handoff import Handoff, normalize_handoffs
 from modmex_ai.agents.result import AgentResult
-from modmex_ai.agents.stream import AgentStreamEvent, AgentStreamEventType
+from modmex_ai.agents.stream import AgentStreamEvent, AgentStreamEventType, MCPProgressEvent
 from modmex_ai.errors import OutputGuardrailTriggered, OutputValidationError
 from modmex_ai.guardrails import (
     InputGuardrail,
@@ -31,6 +31,8 @@ from modmex_ai.models import (
 from modmex_ai.schemas import dumps, schema_for_model, validate_model
 from modmex_ai.sessions import SessionItem
 from modmex_ai.tools import Tool, as_tool, tool as create_tool
+from modmex_ai.mcp.tools import RemoteTool
+from modmex_ai.tools.tool import ToolResult
 
 
 _NESTED_USAGE_STATE_KEY = "__modmex_ai_nested_usage"
@@ -171,6 +173,14 @@ class Agent:
         astream = getattr(execution.model, "astream", None)
         if not callable(astream):
             raise NotImplementedError("Model does not implement native async streaming")
+        try:
+            async for event in self._arun_stream_events(execution, astream):
+                yield event
+        except asyncio.CancelledError:
+            execution.context.state["cancelled"] = True
+            raise
+
+    async def _arun_stream_events(self, execution: AgentExecution, astream):
         while True:
             completed: ModelResponse | None = None
             async for raw_event in astream(execution.next_request()):
@@ -190,7 +200,28 @@ class Agent:
             for tool_call in step.tool_calls or []:
                 execution.begin_tool_call(tool_call)
                 yield AgentStreamEvent(type=AgentStreamEventType.TOOL_CALL_DELTA, tool_call=tool_call)
-                tool_result = await execution.executor.execute_async(tool_call, context=execution.context)
+                tool = execution.executor.tools.get(tool_call.name)
+                if isinstance(tool, RemoteTool):
+                    stream = tool.stream(tool_call.arguments)
+                    tool_output = None
+                    try:
+                        async for event in stream:
+                            if event["kind"] == "result":
+                                tool_output = event["output"]
+                                break
+                            yield AgentStreamEvent(
+                                type=AgentStreamEventType.MCP_PROGRESS,
+                                tool_call=tool_call,
+                                mcp_progress=MCPProgressEvent(data=event.get("data", {})),
+                                data=event.get("data", {}),
+                            )
+                    finally:
+                        await stream.aclose()
+                    if tool_output is None:
+                        raise asyncio.CancelledError
+                    tool_result = ToolResult(tool_call_id=tool_call.tool_call_id, name=tool_call.name, output=tool_output)
+                else:
+                    tool_result = await execution.executor.execute_async(tool_call, context=execution.context)
                 execution.accept_tool_result(tool_result)
                 yield AgentStreamEvent(type=AgentStreamEventType.TOOL_FINISHED, tool_call=tool_call, data={"output": tool_result.output})
 
