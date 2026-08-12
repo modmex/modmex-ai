@@ -45,6 +45,7 @@ class Agent:
         output_type: type[Any] | None = None,
         output_strict: bool = True,
         tools: list[Tool | Any] | None = None,
+        mcp_clients: list[Any] | None = None,
         handoffs: list[str | Handoff] | None = None,
         model: ModelClient | None = None,
         settings: ModelSettings | None = None,
@@ -58,6 +59,7 @@ class Agent:
         self.output_type = output_type
         self.output_strict = output_strict
         self.tools = [as_tool(value) for value in (tools or [])]
+        self.mcp_clients = list(mcp_clients or [])
         self.handoffs = normalize_handoffs(handoffs)
         self.model = model
         self.settings = settings
@@ -106,13 +108,24 @@ class Agent:
         return create_tool(run_agent, name=tool_name or self.name, description=tool_description or self.instructions)
 
     def run(self, input: Any, **kwargs: Any) -> AgentResult:
+        self._ensure_mcp_clients_connected()
         return self._run_execution(self._execution(input, **kwargs))
 
     async def run_async(self, input: Any, **kwargs: Any) -> AgentResult:
+        await self._prepare_mcp_clients()
         execution = self._execution(input, **kwargs)
         acomplete = getattr(execution.model, "acomplete", None)
         if not callable(acomplete):
-            return await asyncio.to_thread(self._run_execution, execution)
+            while True:
+                response = await asyncio.to_thread(execution.model.complete, execution.next_request())
+                step = execution.accept_response(response)
+                if step.result is not None:
+                    return step.result
+                for tool_call in step.tool_calls or []:
+                    execution.begin_tool_call(tool_call)
+                    execution.accept_tool_result(
+                        await execution.executor.execute_async(tool_call, context=execution.context)
+                    )
         while True:
             step = execution.accept_response(await acomplete(execution.next_request()))
             if step.result is not None:
@@ -122,6 +135,7 @@ class Agent:
                 execution.accept_tool_result(await execution.executor.execute_async(tool_call, context=execution.context))
 
     def run_stream(self, input: Any, **kwargs: Any):
+        self._ensure_mcp_clients_connected()
         execution = self._execution(input, **kwargs)
         while True:
             completed: ModelResponse | None = None
@@ -148,6 +162,7 @@ class Agent:
 
     async def arun_stream(self, input: Any, **kwargs: Any):
         """Async counterpart of ``run_stream`` for models with native streaming."""
+        await self._prepare_mcp_clients()
         execution = self._execution(input, **kwargs)
         astream = getattr(execution.model, "astream", None)
         if not callable(astream):
@@ -183,6 +198,25 @@ class Agent:
             for tool_call in step.tool_calls or []:
                 execution.begin_tool_call(tool_call)
                 execution.accept_tool_result(execution.executor.execute(tool_call, context=execution.context))
+
+    async def _prepare_mcp_clients(self) -> None:
+        for client in self.mcp_clients:
+            if not client.connected:
+                await client.connect()
+            for remote_tool in client.tools:
+                if not any(tool.name == remote_tool.name for tool in self.tools):
+                    self.tools.append(remote_tool)
+
+    def _ensure_mcp_clients_connected(self) -> None:
+        for client in self.mcp_clients:
+            if not client.connected:
+                raise RuntimeError(
+                    "Synchronous Agent execution requires connected MCP clients; "
+                    "use await agent.run_async(...) or await client.connect() first"
+                )
+            for remote_tool in client.tools:
+                if not any(tool.name == remote_tool.name for tool in self.tools):
+                    self.tools.append(remote_tool)
 
     def _execution(
         self,

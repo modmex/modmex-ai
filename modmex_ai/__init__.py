@@ -27,6 +27,7 @@ from modmex_ai.models import (
 )
 from modmex_ai.messages import BinaryData, ContentInput, FileInput, ImageInput, InputDetail, Message, TextInput
 from modmex_ai.sessions import InMemorySession, Session, SessionItem, SessionSnapshot
+from modmex_ai.mcp import MCPClient, MCPClientConnection, MCPClientManager, RemoteTool
 from modmex_ai.sessions import DurableSessionStore, InMemoryDurableSessionStore, SessionConflictError
 from modmex_ai.approvals import ApprovalDecision, ApprovalDecisionType, ApprovalPolicy, ApprovalRequest
 from modmex_ai.observability import ObservabilityEvent, ObservabilityObserver
@@ -69,6 +70,8 @@ from modmex_ai.voice import (
 
 __all__ = [
     "Agent",
+    "MCPClientConnection",
+    "MCPClientManager",
     "AsyncModelClient",
     "BinaryData",
     "ContentInput",
@@ -98,6 +101,8 @@ __all__ = [
     "Session",
     "SessionItem",
     "SessionSnapshot",
+    "MCPClient",
+    "RemoteTool",
     "ApprovalDecision",
     "ApprovalDecisionType",
     "ApprovalPolicy",

@@ -338,8 +338,36 @@ separate STT, agent, TTS, total latency, and provider retry count.
 Pass a `VoiceTurnObserver` to export those outcomes to the host's own logs or
 metrics backend without adding an observability dependency to this package.
 
-## Roadmap
+## Model Context Protocol (MCP)
 
-Model Context Protocol (MCP) is not supported yet. MCP client and tool-server
-integration are planned for a future release; today, applications can register
-local tools directly through `Agent`.
+`MCPClient` is the low-level protocol client. `MCPClientConnection` adds
+discovery, tool adaptation, caching and lifecycle management so an `Agent` can
+consume one or more remote MCP servers through `mcp_clients`:
+
+```python
+from modmex_ai import Agent, MCPClientConnection, MCPClientManager
+
+async with MCPClientManager([
+    MCPClientConnection("https://example.com/mcp"),
+]) as mcp_clients:
+    agent = Agent(
+        name="assistant",
+        instructions="Use the available remote tools when appropriate.",
+        mcp_clients=mcp_clients,
+    )
+    result = await agent.run_async("Help me with my request")
+```
+
+Use `client.list_tools()` directly only when the application needs to manage
+the remote tool catalog itself. Resources and prompts remain explicit:
+
+```python
+connection = mcp_clients[0].client
+menu = await connection.read_resource("pizza://menu")
+prompt = await connection.get_prompt("assistant")
+```
+
+The client supports MCP `2026-07-28`, pagination, structured tool results,
+modern metadata/headers and buffered SSE responses. It does not create
+transport sessions. The MCP server transport and Lambda/API Gateway
+integration are provided by `modmex-lambda`.
