@@ -9,6 +9,7 @@ from modmex_ai.http.async_client import AsyncHttpClient
 from modmex_ai.http.sse import parse_sse_lines_async
 from modmex_ai.mcp.tools import RemoteTool
 from modmex_ai.mcp.errors import MCPError, MCPInputRequired
+from modmex_ai.mcp.headers import extract_mcp_parameter_headers
 
 
 class MCPClient:
@@ -45,7 +46,7 @@ class MCPClient:
 
     async def list_tools(self) -> list[RemoteTool]:
         definitions = await self._list_all("tools/list", "tools")
-        return [RemoteTool(self, definition) for definition in definitions]
+        return [RemoteTool(self, definition) for definition in definitions if _valid_tool_definition(definition)]
 
     async def list_tools_page(self, *, cursor: str | None = None, page_size: int | None = None) -> dict[str, Any]:
         return await self._list_page("tools/list", cursor=cursor, page_size=page_size)
@@ -55,6 +56,7 @@ class MCPClient:
         if input_schema is not None:
             params["_schema"] = input_schema
         result = await self._request("tools/call", params)
+        _ensure_complete_result(result)
         if result.get("isError"):
             raise MCPError(-32603, _content_text(result.get("content", [])), data=result)
         if result.get("resultType") == "input_required":
@@ -75,6 +77,7 @@ class MCPClient:
 
     async def read_resource(self, uri: str) -> Any:
         result = await self._request("resources/read", {"uri": uri})
+        _ensure_complete_result(result)
         return result.get("contents", [])
 
     async def list_prompts(self) -> dict[str, Any]:
@@ -84,7 +87,9 @@ class MCPClient:
         return await self._list_page("prompts/list", cursor=cursor, page_size=page_size)
 
     async def get_prompt(self, name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
-        return await self._request("prompts/get", {"name": name, "arguments": arguments or {}})
+        result = await self._request("prompts/get", {"name": name, "arguments": arguments or {}})
+        _ensure_complete_result(result)
+        return result
 
     async def _list_all(self, method: str, key: str) -> list[dict[str, Any]]:
         result = await self._list_all_result(method, key)
@@ -134,15 +139,14 @@ class MCPClient:
             response = await self.http.post_json(self.url, headers=self._headers(method, params), data=self._payload(method, params, self._request_id))
         if isinstance(response.body, str) and "text/event-stream" in response.headers.get("content-type", "").lower():
             events = [event async for event in parse_sse_lines_async(_single_chunk(response.body.encode()))]
-            body = events[-1] if events else {}
+            body = _find_jsonrpc_response(events, self._request_id)
         else:
             body = response.body
-        if not isinstance(body, dict):
-            raise RuntimeError("MCP server returned a non-object response")
+        _validate_jsonrpc_envelope(body, self._request_id)
         if body.get("error") is not None:
             error = body["error"]
             raise MCPError(error.get("code"), error.get("message", "MCP error"), data=error.get("data"), http_status=response.status_code)
-        return body.get("result", {})
+        return body["result"]
 
     def _payload(self, method: str, params: dict[str, Any], request_id: int) -> dict[str, Any]:
         params = params or {}
@@ -170,22 +174,16 @@ class MCPClient:
             **self.headers,
         }
         if method == "tools/call" and params and isinstance(params.get("name"), str):
-            headers["Mcp-Name"] = params["name"]
+            headers["Mcp-Name"] = self._encode_header(params["name"])
         elif method == "prompts/get" and params and isinstance(params.get("name"), str):
-            headers["Mcp-Name"] = params["name"]
+            headers["Mcp-Name"] = self._encode_header(params["name"])
         elif method == "resources/read" and params and isinstance(params.get("uri"), str):
             # Resource URIs are not HTTP header tokens.  The transport's
             # base64 sentinel preserves them losslessly across intermediaries.
             headers["Mcp-Name"] = self._encode_header(params["uri"], force=True)
         schema = params.get("_schema") if params else None
-        if isinstance(schema, dict):
-            for key, value in params.items():
-                if key == "_schema" or not isinstance(value, (str, int, float, bool)):
-                    continue
-                property_schema = schema.get("properties", {}).get(key, {})
-                header_name = property_schema.get("x-mcp-header")
-                if isinstance(header_name, str):
-                    headers[f"Mcp-Param-{header_name}"] = self._encode_header(str(value))
+        if isinstance(schema, dict) and isinstance(params.get("arguments"), dict):
+            headers.update(extract_mcp_parameter_headers(input_schema=schema, arguments=params["arguments"]))
         return headers
 
     @staticmethod
@@ -218,3 +216,44 @@ def _content_value(content: list[dict[str, Any]]) -> Any:
 
 async def _single_chunk(data: bytes):
     yield data
+
+
+def _ensure_complete_result(result: dict[str, Any]) -> None:
+    result_type = result.get("resultType", "complete")
+    if result_type == "input_required":
+        raise MCPInputRequired(result.get("inputRequests", []), result.get("requestState"), data=result)
+    if result_type != "complete":
+        raise MCPError(-32603, f"Unsupported MCP resultType: {result_type}", data=result)
+
+
+def _valid_tool_definition(definition: Any) -> bool:
+    if not isinstance(definition, dict):
+        return False
+    schema = definition.get("inputSchema", {})
+    if not isinstance(schema, dict):
+        return False
+    try:
+        extract_mcp_parameter_headers(input_schema=schema, arguments={})
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _find_jsonrpc_response(messages: list[Any], request_id: int) -> dict[str, Any]:
+    for message in messages:
+        if isinstance(message, dict) and message.get("id") == request_id:
+            return message
+    raise MCPError(-32603, "MCP response did not contain the requested JSON-RPC id")
+
+
+def _validate_jsonrpc_envelope(body: Any, request_id: int) -> None:
+    if not isinstance(body, dict):
+        raise MCPError(-32603, "MCP server returned a non-object JSON-RPC response")
+    if body.get("jsonrpc") != "2.0":
+        raise MCPError(-32603, "Invalid JSON-RPC version in MCP response", data=body)
+    if body.get("id") != request_id:
+        raise MCPError(-32603, "MCP response id does not match request id", data=body)
+    has_result = "result" in body
+    has_error = "error" in body
+    if has_result == has_error:
+        raise MCPError(-32603, "MCP response must contain exactly one of result or error", data=body)
