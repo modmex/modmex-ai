@@ -356,15 +356,15 @@ orjson = ">=3.11.9,<4.0.0"
 
 [[package]]
 name = "modmex-lambda"
-version = "0.7.0"
+version = "0.7.2"
 description = "Ultra-lightweight AWS Lambda utilities for API Gateway routing and event handling."
 optional = true
 python-versions = "<4.0,>=3.10"
 groups = ["main"]
 markers = "extra == \"lambda\""
 files = [
-    {file = "modmex_lambda-0.7.0-py3-none-any.whl", hash = "sha256:bdf78aaf4506578238a3f30ff507d76d109207fef53f1247d6fb6bfb45cfe191"},
-    {file = "modmex_lambda-0.7.0.tar.gz", hash = "sha256:a687bb00f981fceda44a7d2082d7ea48c06b97fe1ddac3d8dbc12abef5bb68a2"},
+    {file = "modmex_lambda-0.7.2-py3-none-any.whl", hash = "sha256:7e449402b8656d0c9dcb574c636f58c5b270a5c4ed2f0316b049132a138d24b1"},
+    {file = "modmex_lambda-0.7.2.tar.gz", hash = "sha256:3c8d54e5f354ec70a6757e75c76ac1e8648b6cff87007cfa068eef2403c1da4b"},
 ]
 
 [package.dependencies]

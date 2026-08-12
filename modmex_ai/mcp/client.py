@@ -125,6 +125,45 @@ class MCPClient:
         async for event in parse_sse_lines_async(chunks):
             yield event
 
+    async def stream_tool_call(
+        self,
+        name: str,
+        arguments: dict[str, Any] | None = None,
+        *,
+        input_schema: dict[str, Any] | None = None,
+    ):
+        """Yield progress events and the final JSON-RPC tool response.
+
+        Progress events are yielded as-is. The final event is validated as a
+        JSON-RPC response and yielded with ``type="result"`` semantics via
+        the ``kind`` field, so callers can distinguish it from progress.
+        """
+        params: dict[str, Any] = {"name": name, "arguments": arguments or {}}
+        if input_schema is not None:
+            params["_schema"] = input_schema
+        request_id = self._request_id + 1
+        async for event in self._stream_request("tools/call", params, request_id):
+            if isinstance(event, dict) and event.get("jsonrpc") == "2.0" and "id" in event:
+                _validate_jsonrpc_envelope(event, request_id)
+                if "error" in event:
+                    error = event["error"]
+                    raise MCPError(error.get("code"), error.get("message", "MCP error"), data=error.get("data"))
+                result = event["result"]
+                _ensure_complete_result(result)
+                yield {"kind": "result", "result": result}
+            else:
+                yield {"kind": "progress", "data": event}
+
+    async def _stream_request(self, method: str, params: dict[str, Any], request_id: int):
+        self._request_id = request_id
+        chunks = self.http.post_json_stream(
+            self.url,
+            headers=self._headers(method, params),
+            data=self._payload(method, params, request_id),
+        )
+        async for event in parse_sse_lines_async(chunks):
+            yield event
+
     async def _request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         self._request_id += 1
         try:

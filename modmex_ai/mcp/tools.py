@@ -25,3 +25,32 @@ class RemoteTool(Tool):
     def _coerce_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Preserve the remote MCP schema instead of inspecting ``**arguments``."""
         return dict(arguments)
+
+    async def stream(self, arguments: dict[str, Any] | str):
+        """Yield MCP progress and return the final tool value.
+
+        This is deliberately separate from ``invoke`` so normal Agent runs
+        remain buffered and existing tool semantics are unchanged.
+        """
+        if isinstance(arguments, str):
+            import json
+            arguments = json.loads(arguments or "{}")
+        async for event in self.client.stream_tool_call(
+            self.name,
+            arguments,
+            input_schema=self.definition.get("inputSchema"),
+        ):
+            if event["kind"] == "progress":
+                yield event
+                continue
+            result = event["result"]
+            if result.get("isError"):
+                from modmex_ai.mcp.client import _content_text
+                from modmex_ai.mcp.errors import MCPError
+                raise MCPError(-32603, _content_text(result.get("content", [])), data=result)
+            if "structuredContent" in result:
+                yield {"kind": "result", "output": result["structuredContent"]}
+                return
+            from modmex_ai.mcp.client import _content_value
+            yield {"kind": "result", "output": _content_value(result.get("content", []))}
+            return

@@ -153,3 +153,52 @@ def test_agent_stream_executes_a_tool_and_emits_tool_events():
         AgentStreamEventType.TOOL_FINISHED,
         AgentStreamEventType.COMPLETED,
     ]
+
+
+def test_agent_arun_stream_emits_mcp_progress_and_keeps_tool_result_in_loop():
+    class StreamingModel(FakeModel):
+        def __init__(self):
+            super().__init__([])
+            self.calls = 0
+
+        def astream(self, request):
+            self.calls += 1
+            if self.calls == 1:
+                async def first():
+                    yield ModelResponse(tool_calls=[ToolCall(
+                        tool_call_id="mcp-1", name="remote", arguments={"message": "hi"}
+                    )])
+                return first()
+            async def second():
+                yield ModelStreamEvent.completed(ModelResponse(output_text="done"))
+            return second()
+
+    class FakeMCPClient:
+        connected = True
+        tools = []
+
+        async def stream_tool_call(self, name, arguments, *, input_schema=None):
+            yield {"kind": "progress", "data": {"progress": 1, "message": "working"}}
+            yield {"kind": "result", "result": {
+                "resultType": "complete",
+                "structuredContent": {"ok": True},
+            }}
+
+    from modmex_ai.mcp.tools import RemoteTool
+
+    remote = RemoteTool(FakeMCPClient(), {
+        "name": "remote",
+        "description": "Remote tool",
+        "inputSchema": {"type": "object", "properties": {}},
+    })
+
+    async def run():
+        agent = Agent(name="a", instructions="x", tools=[remote], model=StreamingModel())
+        return [event async for event in agent.arun_stream("go")]
+
+    events = asyncio.run(run())
+    progress = next(event for event in events if event.type == AgentStreamEventType.MCP_PROGRESS)
+    assert progress.mcp_progress.data == {"progress": 1, "message": "working"}
+    finished = next(event for event in events if event.type == AgentStreamEventType.TOOL_FINISHED)
+    assert finished.data["output"] == {"ok": True}
+    assert events[-1].result.output == "done"
