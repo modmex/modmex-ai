@@ -9,7 +9,7 @@ from modmex_ai.http.async_client import AsyncHttpClient
 from modmex_ai.http.sse import parse_sse_lines_async
 from modmex_ai.mcp.tools import RemoteTool
 from modmex_ai.mcp.errors import MCPError, MCPInputRequired
-from modmex_ai.mcp.headers import encode_mcp_header_value, extract_mcp_parameter_headers
+from modmex_ai.mcp.headers import encode_mcp_header_value, extract_mcp_parameter_headers, validate_mcp_input_schema
 
 
 class MCPClient:
@@ -227,9 +227,7 @@ def _valid_tool_definition(definition: Any) -> bool:
     schema = definition.get("inputSchema", {})
     if not isinstance(schema, dict):
         return False
-    try:
-        extract_mcp_parameter_headers(input_schema=schema, arguments={})
-    except (TypeError, ValueError):
+    if not validate_mcp_input_schema(schema):
         return False
     return True
 

@@ -16,6 +16,7 @@ _SAFE_HEADER_VALUE = frozenset("!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVW
 
 def extract_mcp_parameter_headers(*, input_schema: dict[str, Any], arguments: dict[str, Any]) -> dict[str, str]:
     """Extract ``x-mcp-header`` properties from nested tool arguments."""
+    validate_mcp_header_locations(input_schema)
     headers: dict[str, str] = {}
     header_names: set[str] = set()
 
@@ -66,6 +67,25 @@ def validate_mcp_input_schema(schema: Any) -> bool:
     except (TypeError, ValueError):
         return False
     return isinstance(schema, dict)
+
+
+def validate_mcp_header_locations(schema: Any) -> None:
+    """Require every annotation to be statically reachable through properties."""
+    def walk(node: Any, *, reachable: bool, root: bool = False) -> None:
+        if isinstance(node, dict):
+            if "x-mcp-header" in node and not reachable:
+                raise ValueError("x-mcp-header is not statically reachable through properties")
+            for key, value in node.items():
+                if key == "properties" and isinstance(value, dict):
+                    for property_schema in value.values():
+                        walk(property_schema, reachable=reachable or root)
+                else:
+                    walk(value, reachable=False)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item, reachable=False)
+
+    walk(schema, reachable=False, root=True)
 
 
 def encode_mcp_header_value(value: str, *, force: bool = False) -> str:

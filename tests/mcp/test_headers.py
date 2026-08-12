@@ -105,3 +105,12 @@ def test_schema_validation_helper_returns_false_for_invalid_schema() -> None:
     assert validate_mcp_input_schema({"type": "object", "properties": {}})
     assert not validate_mcp_input_schema(None)
     assert not validate_mcp_input_schema({"type": "object", "properties": []})
+
+
+@pytest.mark.parametrize("schema", [
+    {"type": "object", "oneOf": [{"properties": {"region": {"type": "string", "x-mcp-header": "Region"}}}]},
+    {"type": "object", "properties": {"items": {"type": "array", "items": {"properties": {"region": {"type": "string", "x-mcp-header": "Region"}}}}}},
+    {"type": "object", "$defs": {"Region": {"type": "string", "x-mcp-header": "Region"}}},
+])
+def test_rejects_headers_outside_static_properties_paths(schema) -> None:
+    assert not validate_mcp_input_schema(schema)
