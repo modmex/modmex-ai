@@ -60,6 +60,10 @@ class Agent:
         self.output_strict = output_strict
         self.tools = [as_tool(value) for value in (tools or [])]
         self.mcp_clients = list(mcp_clients or [])
+        # Names already attached from each connection.  This keeps repeated
+        # agent runs idempotent while still rejecting collisions between
+        # different MCP servers (or with local tools).
+        self._mcp_tool_names: dict[int, set[str]] = {}
         self.handoffs = normalize_handoffs(handoffs)
         self.model = model
         self.settings = settings
@@ -203,9 +207,14 @@ class Agent:
         for client in self.mcp_clients:
             if not client.connected:
                 await client.connect()
+            attached = self._mcp_tool_names.setdefault(id(client), set())
             for remote_tool in client.tools:
-                if not any(tool.name == remote_tool.name for tool in self.tools):
-                    self.tools.append(remote_tool)
+                if remote_tool.name in attached:
+                    continue
+                if any(tool.name == remote_tool.name for tool in self.tools):
+                    raise ValueError(f"Duplicate tool name from MCP client: {remote_tool.name}")
+                self.tools.append(remote_tool)
+                attached.add(remote_tool.name)
 
     def _ensure_mcp_clients_connected(self) -> None:
         for client in self.mcp_clients:
@@ -214,9 +223,14 @@ class Agent:
                     "Synchronous Agent execution requires connected MCP clients; "
                     "use await agent.run_async(...) or await client.connect() first"
                 )
+            attached = self._mcp_tool_names.setdefault(id(client), set())
             for remote_tool in client.tools:
-                if not any(tool.name == remote_tool.name for tool in self.tools):
-                    self.tools.append(remote_tool)
+                if remote_tool.name in attached:
+                    continue
+                if any(tool.name == remote_tool.name for tool in self.tools):
+                    raise ValueError(f"Duplicate tool name from MCP client: {remote_tool.name}")
+                self.tools.append(remote_tool)
+                attached.add(remote_tool.name)
 
     def _execution(
         self,

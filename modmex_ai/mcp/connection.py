@@ -68,6 +68,7 @@ class MCPClientConnection:
 
     def invalidate_tools_cache(self) -> None:
         self._tools = None
+        self._connected = False
 
     async def close(self) -> None:
         self._connected = False

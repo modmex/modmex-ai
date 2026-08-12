@@ -12,7 +12,7 @@ class RemoteTool(Tool):
         self.client = client
         self.definition = definition
         async def invoke(**arguments: Any) -> Any:
-            return await client.call_tool(definition["name"], arguments)
+            return await client.call_tool(definition["name"], arguments, input_schema=definition.get("inputSchema"))
         super().__init__(invoke, name=definition["name"], description=definition.get("description", ""))
 
     def schema(self) -> dict[str, Any]:
