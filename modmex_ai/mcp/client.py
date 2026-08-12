@@ -9,7 +9,7 @@ from modmex_ai.http.async_client import AsyncHttpClient
 from modmex_ai.http.sse import parse_sse_lines_async
 from modmex_ai.mcp.tools import RemoteTool
 from modmex_ai.mcp.errors import MCPError, MCPInputRequired
-from modmex_ai.mcp.headers import extract_mcp_parameter_headers
+from modmex_ai.mcp.headers import encode_mcp_header_value, extract_mcp_parameter_headers
 
 
 class MCPClient:
@@ -59,8 +59,6 @@ class MCPClient:
         _ensure_complete_result(result)
         if result.get("isError"):
             raise MCPError(-32603, _content_text(result.get("content", [])), data=result)
-        if result.get("resultType") == "input_required":
-            raise MCPInputRequired(result.get("inputRequests", []), result.get("requestState"), data=result)
         if "structuredContent" in result:
             return result["structuredContent"]
         return _content_value(result.get("content", []))
@@ -188,10 +186,7 @@ class MCPClient:
 
     @staticmethod
     def _encode_header(value: str, *, force: bool = False) -> str:
-        import base64
-        if force or any(char not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._~-" for char in value):
-            return "=?base64?" + base64.b64encode(value.encode()).decode() + "?="
-        return value
+        return encode_mcp_header_value(value, force=force)
 
 
 def _header(headers: dict[str, str], name: str) -> str | None:
