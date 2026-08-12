@@ -61,6 +61,7 @@ class AsyncHttpClient:
         headers: dict[str, str] | None = None,
         data: dict[str, Any] | None = None,
         timeout: float | None = None,
+        raise_for_status: bool = True,
     ) -> HttpResponse:
         async for response in self._post(
             url,
@@ -68,6 +69,7 @@ class AsyncHttpClient:
             data=data,
             timeout=timeout,
             stream=False,
+            raise_for_status=raise_for_status,
         ):
             return response
         raise AssertionError("Async HTTP request did not return a response")
@@ -100,6 +102,7 @@ class AsyncHttpClient:
         data: dict[str, Any] | None,
         timeout: float | None,
         stream: bool,
+        raise_for_status: bool = True,
     ) -> AsyncIterator[Any]:
         client = await self._get_client()
         for attempt in range(self.retry.attempts + 1):
@@ -112,7 +115,8 @@ class AsyncHttpClient:
                         json=data,
                         timeout=timeout or self.timeout,
                     ) as response:
-                        response.raise_for_status()
+                        if raise_for_status:
+                            response.raise_for_status()
                         yield response
                 else:
                     response = await client.post(
@@ -121,11 +125,12 @@ class AsyncHttpClient:
                         json=data,
                         timeout=timeout or self.timeout,
                     )
-                    response.raise_for_status()
+                    if raise_for_status:
+                        response.raise_for_status()
                     yield HttpResponse(
                         status_code=response.status_code,
                         headers=dict(response.headers),
-                        body=response.json() if response.content else {},
+                        body=(response.text if "text/event-stream" in response.headers.get("content-type", "").lower() else response.json()) if response.content else {},
                     )
                 return
             except asyncio.CancelledError:

@@ -1,10 +1,12 @@
 from dataclasses import field
 from enum import Enum
 from typing import Any, Literal
+import pytest
 
 from modmex import BaseModel
 
 from modmex_ai.schemas import schema_for_model, schema_for_type, validate_model
+from modmex_ai.schemas.json_schema import function_schema
 
 
 class Payload(BaseModel):
@@ -68,3 +70,14 @@ def test_validate_model_applies_default_factory_for_strict_null_values():
     )
 
     assert value.nested.tags == []
+
+
+def test_function_schema_hoists_nested_definitions_and_detects_conflicts():
+    schema = function_schema(
+        "lookup", "Lookup", {"payload": {"$ref": "#/$defs/Payload", "$defs": {"Payload": {"type": "object"}}}}, ["payload"]
+    )
+    assert schema["parameters"]["$defs"]["Payload"] == {"type": "object"}
+    assert "$defs" not in schema["parameters"]["properties"]["payload"]
+
+    with pytest.raises(ValueError, match="Conflicting"):
+        function_schema("bad", "", {"a": {"$defs": {"X": {"type": "string"}}}, "b": {"$defs": {"X": {"type": "integer"}}}}, [])

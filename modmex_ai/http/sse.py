@@ -23,6 +23,14 @@ def parse_sse_lines(lines: Iterable[bytes | str]):
                 continue
             if text.startswith("data:"):
                 data.append(text[5:].strip())
+    if data:
+        payload = "\n".join(data)
+        if payload != "[DONE]":
+            yield json.loads(payload)
+    elif buffer.strip():
+        # Streamable HTTP servers may legally return one JSON response when
+        # no event stream is needed, even when the client requested events.
+        yield json.loads(buffer.strip())
 
 
 async def parse_sse_lines_async(lines: AsyncIterable[bytes | str]):
@@ -44,6 +52,12 @@ async def parse_sse_lines_async(lines: AsyncIterable[bytes | str]):
                 continue
             if text.startswith("data:"):
                 data.append(text[5:].strip())
+    if data:
+        payload = "\n".join(data)
+        if payload != "[DONE]":
+            yield json.loads(payload)
+    elif buffer.strip():
+        yield json.loads(buffer.strip())
 
 
 def event_data(event: dict[str, Any]) -> Any:
