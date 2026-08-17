@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 from typing import Any
 
 from modmex_ai.http.async_client import AsyncHttpClient
@@ -10,6 +11,9 @@ from modmex_ai.http.sse import parse_sse_lines_async
 from modmex_ai.mcp.tools import RemoteTool
 from modmex_ai.mcp.errors import MCPError, MCPInputRequired
 from modmex_ai.mcp.headers import encode_mcp_header_value, extract_mcp_parameter_headers, validate_mcp_input_schema
+from modmex_ai.mcp.headers_provider import MCPHeadersProvider, MCPRequest
+
+MCPHeaders = dict[str, str] | MCPHeadersProvider
 
 
 class MCPClient:
@@ -17,12 +21,12 @@ class MCPClient:
         self,
         url: str,
         *,
-        headers: dict[str, str] | None = None,
+        headers: MCPHeaders | None = None,
         http: AsyncHttpClient | None = None,
         protocol_version: str = "2026-07-28",
     ) -> None:
         self.url = url
-        self.headers = dict(headers or {})
+        self.headers = headers or {}
         self.http = http or AsyncHttpClient()
         self._owns_http = http is None
         self.protocol_version = protocol_version
@@ -117,9 +121,10 @@ class MCPClient:
         """Yield decoded SSE events from an MCP request."""
         self._request_id += 1
         data = self._payload(method, params, self._request_id)
+        headers = await self._request_headers(method, params, data)
         chunks = self.http.post_json_stream(
             self.url,
-        headers=self._headers(method, params),
+            headers=headers,
             data=data,
         )
         async for event in parse_sse_lines_async(chunks):
@@ -156,9 +161,10 @@ class MCPClient:
 
     async def _stream_request(self, method: str, params: dict[str, Any], request_id: int):
         self._request_id = request_id
+        headers = await self._request_headers(method, params, self._payload(method, params, request_id))
         chunks = self.http.post_json_stream(
             self.url,
-            headers=self._headers(method, params),
+            headers=headers,
             data=self._payload(method, params, request_id),
         )
         async for event in parse_sse_lines_async(chunks):
@@ -166,14 +172,16 @@ class MCPClient:
 
     async def _request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         self._request_id += 1
+        payload = self._payload(method, params, self._request_id)
+        headers = await self._request_headers(method, params, payload)
         try:
             response = await self.http.post_json(
-                self.url, headers=self._headers(method, params),
-                data=self._payload(method, params, self._request_id),
+                self.url, headers=headers,
+                data=payload,
                 raise_for_status=False,
             )
         except TypeError:  # compatibility with injected test transports
-            response = await self.http.post_json(self.url, headers=self._headers(method, params), data=self._payload(method, params, self._request_id))
+            response = await self.http.post_json(self.url, headers=headers, data=payload)
         if isinstance(response.body, str) and "text/event-stream" in response.headers.get("content-type", "").lower():
             events = [event async for event in parse_sse_lines_async(_single_chunk(response.body.encode()))]
             body = _find_jsonrpc_response(events, self._request_id)
@@ -208,7 +216,6 @@ class MCPClient:
             "accept": "application/json, text/event-stream",
             "MCP-Protocol-Version": self.protocol_version,
             "Mcp-Method": method,
-            **self.headers,
         }
         if method == "tools/call" and params and isinstance(params.get("name"), str):
             headers["Mcp-Name"] = self._encode_header(params["name"])
@@ -221,6 +228,29 @@ class MCPClient:
         schema = params.get("_schema") if params else None
         if isinstance(schema, dict) and isinstance(params.get("arguments"), dict):
             headers.update(extract_mcp_parameter_headers(input_schema=schema, arguments=params["arguments"]))
+        return headers
+
+    async def _request_headers(
+        self,
+        method: str,
+        params: dict[str, Any] | None,
+        payload: dict[str, Any],
+    ) -> dict[str, str]:
+        headers = self._headers(method, params)
+        if not callable(self.headers):
+            return {**headers, **self.headers}
+
+        result = self.headers(
+            MCPRequest(
+                url=self.url,
+                method="POST",
+                headers=dict(headers),
+                payload=payload,
+            )
+        )
+        if inspect.isawaitable(result):
+            result = await result
+        headers.update(result)
         return headers
 
     @staticmethod
