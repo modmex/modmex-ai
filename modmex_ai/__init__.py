@@ -28,7 +28,7 @@ from modmex_ai.models import (
 )
 from modmex_ai.messages import BinaryData, ContentInput, FileInput, ImageInput, InputDetail, Message, TextInput
 from modmex_ai.sessions import InMemorySession, Session, SessionItem, SessionSnapshot
-from modmex_ai.mcp import MCPClient, MCPClientConnection, MCPClientManager, RemoteTool, MCPError, MCPInputRequired
+from modmex_ai.mcp import MCPClient, MCPClientConnection, MCPClientManager, RemoteTool, MCPError, MCPInputRequired, MCPHeadersProvider, MCPRequest
 from modmex_ai.sessions import DurableSessionStore, InMemoryDurableSessionStore, SessionConflictError
 from modmex_ai.approvals import ApprovalDecision, ApprovalDecisionType, ApprovalPolicy, ApprovalRequest
 from modmex_ai.observability import ObservabilityEvent, ObservabilityObserver

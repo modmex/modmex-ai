@@ -5,6 +5,7 @@ from __future__ import annotations
 from modmex_ai.http.async_client import AsyncHttpClient
 from modmex_ai.mcp.client import MCPClient
 from modmex_ai.mcp.tools import RemoteTool
+from modmex_ai.mcp.client import MCPHeaders
 
 
 class MCPClientConnection:
@@ -19,7 +20,7 @@ class MCPClientConnection:
         url_or_client: str | MCPClient | None = None,
         *,
         client: MCPClient | None = None,
-        headers: dict[str, str] | None = None,
+        headers: MCPHeaders | None = None,
         http: AsyncHttpClient | None = None,
         discover: bool = True,
     ) -> None:
@@ -28,11 +29,18 @@ class MCPClientConnection:
         source = client if client is not None else url_or_client
         if isinstance(source, MCPClient):
             if headers is not None or http is not None:
-                raise ValueError("headers and http require a URL, not an injected MCPClient")
+                raise ValueError(
+                    "headers and http require a URL, "
+                    "not an injected MCPClient"
+                )
             self.client = source
             self._owns_client = False
         elif isinstance(source, str):
-            self.client = MCPClient(source, headers=headers, http=http)
+            self.client = MCPClient(
+                source,
+                headers=headers,
+                http=http,
+            )
             self._owns_client = True
         else:
             raise TypeError("MCPClientConnection requires a URL or MCPClient")
