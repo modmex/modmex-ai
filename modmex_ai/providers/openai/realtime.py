@@ -48,6 +48,21 @@ class OpenAIServerVadConfig(BaseModel):
         }
 
 
+class OpenAIInputAudioTranscriptionConfig(BaseModel):
+    """Configuration for input audio transcription in a Realtime session."""
+
+    model: str = "gpt-4o-mini-transcribe"
+    language: str | None = None
+    prompt: str | None = None
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            key: value
+            for key, value in self.model_dump().items()
+            if value is not None
+        }
+
+
 class OpenAIRealtimeSessionConfig(BaseModel):
     """OpenAI Realtime session fields shared by WebSocket and SIP calls."""
 
@@ -57,6 +72,7 @@ class OpenAIRealtimeSessionConfig(BaseModel):
         default_factory=lambda: ["audio"]
     )
     turn_detection: OpenAIServerVadConfig | None = None
+    input_audio_transcription: OpenAIInputAudioTranscriptionConfig | None = None
     tool_choice: Literal["auto", "none", "required"] = "auto"
 
     def to_accept_payload(self, agent: Agent) -> dict[str, Any]:
@@ -82,8 +98,15 @@ class OpenAIRealtimeSessionConfig(BaseModel):
         audio: dict[str, Any] = {}
         if self.voice is not None:
             audio["output"] = {"voice": self.voice}
+        input_audio: dict[str, Any] = {}
         if self.turn_detection is not None:
-            audio["input"] = {"turn_detection": self.turn_detection.to_payload()}
+            input_audio["turn_detection"] = self.turn_detection.to_payload()
+        if self.input_audio_transcription is not None:
+            input_audio["transcription"] = (
+                self.input_audio_transcription.to_payload()
+            )
+        if input_audio:
+            audio["input"] = input_audio
         if audio:
             session["audio"] = audio
         return session

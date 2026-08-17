@@ -7,10 +7,41 @@ import pytest
 
 from modmex_ai import Agent, GuardrailResult, Handoff, tool
 from modmex_ai.providers.openai import (
+    OpenAIInputAudioTranscriptionConfig,
     OpenAIRealtimeSession,
     OpenAIRealtimeSessionConfig,
     OpenAIServerVadConfig,
 )
+
+
+def test_openai_realtime_configures_input_audio_transcription():
+    config = OpenAIRealtimeSessionConfig(
+        voice="marin",
+        turn_detection=OpenAIServerVadConfig(silence_duration_ms=500),
+        input_audio_transcription=OpenAIInputAudioTranscriptionConfig(
+            model="gpt-4o-mini-transcribe",
+            language="en",
+        ),
+    )
+
+    payload = config.to_session_update(
+        Agent(name="voice", instructions="Help the caller."),
+        include_model=False,
+    )
+
+    assert payload["audio"] == {
+        "output": {"voice": "marin"},
+        "input": {
+            "turn_detection": {
+                "type": "server_vad",
+                "silence_duration_ms": 500,
+            },
+            "transcription": {
+                "model": "gpt-4o-mini-transcribe",
+                "language": "en",
+            },
+        },
+    }
 from modmex_ai.providers.openai.realtime import OpenAIRealtimeClient, _usage_from_response
 from modmex_ai.errors import RealtimeConnectionError
 from modmex_ai.errors import RealtimeProtocolError
