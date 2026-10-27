@@ -509,7 +509,7 @@ def _split_instructions(messages: list[Message | SessionItem]) -> tuple[str | No
         input_items.append(
             {
                 "role": message.role,
-                "content": _responses_content(message.content),
+                "content": _responses_content(message.content, role=message.role),
             }
         )
     return "\n\n".join(instructions) if instructions else None, input_items
@@ -601,7 +601,7 @@ def _message_input_item(message: Message) -> dict[str, Any]:
         }
     return {
         "role": message.role,
-        "content": _responses_content(message.content),
+        "content": _responses_content(message.content, role=message.role),
     }
 
 
@@ -614,10 +614,16 @@ def _instructions_payload(content: Any) -> str:
     return "\n".join(part.text for part in parts)
 
 
-def _responses_content(content: Any) -> list[dict[str, Any]]:
+def _responses_content(content: Any, *, role: str = "user") -> list[dict[str, Any]]:
     if isinstance(content, str):
-        return [{"type": "input_text", "text": content}]
-    return [_responses_content_part(part) for part in _content_inputs(content)]
+        parts = [{"type": "input_text", "text": content}]
+    else:
+        parts = [_responses_content_part(part) for part in _content_inputs(content)]
+    if role == "assistant":
+        if any(part["type"] != "input_text" for part in parts):
+            raise ValueError("OpenAI Responses assistant messages support text output only.")
+        return [{"type": "output_text", "text": part["text"]} for part in parts]
+    return parts
 
 
 def _responses_content_part(part: TextInput | FileInput | ImageInput) -> dict[str, Any]:
