@@ -543,3 +543,22 @@ def test_openai_mapper_normalizes_nested_schema_provider_state_and_incomplete_st
         {"type": "response.function_call_arguments.done", "call_id": "tool", "name": "lookup", "arguments": "{}"},
     ], headers={}, status_code=200, model="gpt"))
     assert events[-1].response.tool_calls[0].name == "lookup"
+
+
+@pytest.mark.parametrize("message_type,content", [
+    (Message, "Previous reply"),
+    (Message, [TextInput(text="Previous reply")]),
+    (SessionItem, "Previous reply"),
+])
+def test_responses_history_uses_output_text_for_assistant_messages(message_type, content):
+    request = ModelRequest(messages=[
+        message_type(role="user", content="Initial question"),
+        message_type(role="assistant", content=content),
+        message_type(role="user", content="Follow-up question"),
+    ])
+    payload = to_responses_payload(request, "gpt-test")
+    assert payload["input"] == [
+        {"role": "user", "content": [{"type": "input_text", "text": "Initial question"}]},
+        {"role": "assistant", "content": [{"type": "output_text", "text": "Previous reply"}]},
+        {"role": "user", "content": [{"type": "input_text", "text": "Follow-up question"}]},
+    ]
