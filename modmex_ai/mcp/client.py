@@ -172,7 +172,8 @@ class MCPClient:
 
     async def _request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         self._request_id += 1
-        payload = self._payload(method, params, self._request_id)
+        request_id = self._request_id
+        payload = self._payload(method, params, request_id)
         headers = await self._request_headers(method, params, payload)
         try:
             response = await self.http.post_json(
@@ -184,10 +185,10 @@ class MCPClient:
             response = await self.http.post_json(self.url, headers=headers, data=payload)
         if isinstance(response.body, str) and "text/event-stream" in response.headers.get("content-type", "").lower():
             events = [event async for event in parse_sse_lines_async(_single_chunk(response.body.encode()))]
-            body = _find_jsonrpc_response(events, self._request_id)
+            body = _find_jsonrpc_response(events, request_id)
         else:
             body = response.body
-        _validate_jsonrpc_envelope(body, self._request_id)
+        _validate_jsonrpc_envelope(body, request_id)
         if body.get("error") is not None:
             error = body["error"]
             raise MCPError(error.get("code"), error.get("message", "MCP error"), data=error.get("data"), http_status=response.status_code)

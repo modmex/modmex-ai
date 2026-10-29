@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import aclosing
 from typing import Any
 
 from modmex_ai.agents.context import RunContext
@@ -52,6 +53,7 @@ class Agent:
         model: ModelClient | None = None,
         settings: ModelSettings | None = None,
         max_tool_calls: int = 8,
+        parallel_tool_calls: bool = False,
         input_guardrails: list[InputGuardrail] | None = None,
         output_guardrails: list[OutputGuardrail] | None = None,
         max_output_guardrail_retries: int = 0,
@@ -70,6 +72,7 @@ class Agent:
         self.model = model
         self.settings = settings
         self.max_tool_calls = max_tool_calls
+        self.parallel_tool_calls = parallel_tool_calls
         self.input_guardrails = input_guardrails or []
         self.output_guardrails = output_guardrails or []
         if max_output_guardrail_retries < 0:
@@ -121,24 +124,15 @@ class Agent:
         await self._prepare_mcp_clients()
         execution = self._execution(input, **kwargs)
         acomplete = getattr(execution.model, "acomplete", None)
-        if not callable(acomplete):
-            while True:
-                response = await asyncio.to_thread(execution.model.complete, execution.next_request())
-                step = execution.accept_response(response)
-                if step.result is not None:
-                    return step.result
-                for tool_call in step.tool_calls or []:
-                    execution.begin_tool_call(tool_call)
-                    execution.accept_tool_result(
-                        await execution.executor.execute_async(tool_call, context=execution.context)
-                    )
         while True:
-            step = execution.accept_response(await acomplete(execution.next_request()))
+            request = execution.next_request()
+            response = (await acomplete(request) if callable(acomplete)
+                        else await asyncio.to_thread(execution.model.complete, request))
+            step = execution.accept_response(response)
             if step.result is not None:
                 return step.result
-            for tool_call in step.tool_calls or []:
-                execution.begin_tool_call(tool_call)
-                execution.accept_tool_result(await execution.executor.execute_async(tool_call, context=execution.context))
+            async for _ in self._execute_tool_events(execution, step.tool_calls or [], streaming=False):
+                pass
 
     def run_stream(self, input: Any, **kwargs: Any):
         self._ensure_mcp_clients_connected()
@@ -174,8 +168,9 @@ class Agent:
         if not callable(astream):
             raise NotImplementedError("Model does not implement native async streaming")
         try:
-            async for event in self._arun_stream_events(execution, astream):
-                yield event
+            async with aclosing(self._arun_stream_events(execution, astream)) as events:
+                async for event in events:
+                    yield event
         except asyncio.CancelledError:
             execution.context.state["cancelled"] = True
             raise
@@ -197,33 +192,88 @@ class Agent:
             if step.result is not None:
                 yield AgentStreamEvent(type=AgentStreamEventType.HANDOFF if step.result.handoff_target else AgentStreamEventType.COMPLETED, result=step.result)
                 return
-            for tool_call in step.tool_calls or []:
-                execution.begin_tool_call(tool_call)
-                yield AgentStreamEvent(type=AgentStreamEventType.TOOL_CALL_DELTA, tool_call=tool_call)
-                tool = execution.executor.tools.get(tool_call.name)
-                if isinstance(tool, RemoteTool):
-                    stream = tool.stream(tool_call.arguments)
-                    tool_output = None
-                    try:
-                        async for event in stream:
-                            if event["kind"] == "result":
-                                tool_output = event["output"]
-                                break
-                            yield AgentStreamEvent(
-                                type=AgentStreamEventType.MCP_PROGRESS,
-                                tool_call=tool_call,
-                                mcp_progress=MCPProgressEvent(data=event.get("data", {})),
-                                data=event.get("data", {}),
-                            )
-                    finally:
-                        await stream.aclose()
-                    if tool_output is None:
-                        raise asyncio.CancelledError
-                    tool_result = ToolResult(tool_call_id=tool_call.tool_call_id, name=tool_call.name, output=tool_output)
+            async with aclosing(self._execute_tool_events(execution, step.tool_calls or [], streaming=True)) as events:
+                async for event in events:
+                    yield event
+
+    async def _tool_events(self, execution, tool_call, *, streaming):
+        yield AgentStreamEvent(type=AgentStreamEventType.TOOL_CALL_DELTA, tool_call=tool_call)
+        tool = execution.executor.tools.get(tool_call.name)
+        if streaming and isinstance(tool, RemoteTool):
+            stream = tool.stream(tool_call.arguments)
+            tool_output = None
+            try:
+                async for event in stream:
+                    if event["kind"] == "result":
+                        tool_output = event["output"]
+                        break
+                    yield AgentStreamEvent(
+                        type=AgentStreamEventType.MCP_PROGRESS,
+                        tool_call=tool_call,
+                        mcp_progress=MCPProgressEvent(data=event.get("data", {})),
+                        data=event.get("data", {}),
+                    )
+            finally:
+                await stream.aclose()
+            if tool_output is None:
+                raise asyncio.CancelledError
+            tool_result = ToolResult(tool_call_id=tool_call.tool_call_id, name=tool_call.name, output=tool_output)
+        else:
+            tool_result = await execution.executor.execute_async(tool_call, context=execution.context)
+        yield AgentStreamEvent(type=AgentStreamEventType.TOOL_FINISHED, tool_call=tool_call, data={"output": tool_result.output})
+
+    async def _execute_tool_events(self, execution, calls, *, streaming):
+        results = {}
+
+        def accept(event):
+            if event.type == AgentStreamEventType.TOOL_FINISHED:
+                results[event.tool_call.tool_call_id] = ToolResult(
+                    tool_call_id=event.tool_call.tool_call_id,
+                    name=event.tool_call.name,
+                    output=event.data["output"],
+                )
+
+        if not self.parallel_tool_calls:
+            for call in calls:
+                execution.begin_tool_call(call)
+                async for event in self._tool_events(execution, call, streaming=streaming):
+                    accept(event)
+                    yield event
+                execution.accept_tool_result(results[call.tool_call_id])
+            return
+
+        queue = asyncio.Queue()
+
+        async def worker(call):
+            try:
+                async for event in self._tool_events(execution, call, streaming=streaming):
+                    await queue.put(event)
+            except BaseException as error:
+                await queue.put(error)
+            finally:
+                await queue.put(None)
+
+        tasks = []
+        try:
+            for call in calls:
+                execution.begin_tool_call(call)
+                tasks.append(asyncio.create_task(worker(call)))
+            remaining = len(tasks)
+            while remaining:
+                event = await queue.get()
+                if event is None:
+                    remaining -= 1
+                elif isinstance(event, BaseException):
+                    raise event
                 else:
-                    tool_result = await execution.executor.execute_async(tool_call, context=execution.context)
-                execution.accept_tool_result(tool_result)
-                yield AgentStreamEvent(type=AgentStreamEventType.TOOL_FINISHED, tool_call=tool_call, data={"output": tool_result.output})
+                    accept(event)
+                    yield event
+            for call in calls:
+                execution.accept_tool_result(results[call.tool_call_id])
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     def _run_execution(self, execution: AgentExecution) -> AgentResult:
         while True:
@@ -235,9 +285,14 @@ class Agent:
                 execution.accept_tool_result(execution.executor.execute(tool_call, context=execution.context))
 
     async def _prepare_mcp_clients(self) -> None:
+        tasks = [asyncio.create_task(client.connect()) for client in self.mcp_clients if not client.connected]
+        try:
+            await asyncio.gather(*tasks)
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
         for client in self.mcp_clients:
-            if not client.connected:
-                await client.connect()
             attached = self._mcp_tool_names.setdefault(id(client), set())
             for remote_tool in client.tools:
                 if remote_tool.name in attached:
