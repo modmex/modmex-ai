@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextvars import ContextVar
 import inspect
 import json
 import types
@@ -17,6 +18,9 @@ from modmex_ai.guardrails import (
     enforce_tool_output_guardrails,
 )
 from modmex_ai.schemas import dumps, function_schema, schema_for_type, validate_tool_args
+
+
+_current_tool_call_id: ContextVar[str | None] = ContextVar("tool_call_id", default=None)
 
 
 class ToolResult(BaseModel):
@@ -114,7 +118,7 @@ class Tool:
     def _require_approval(self, arguments: dict[str, Any], *, context: Any) -> None:
         if not self.requires_approval:
             return
-        tool_call_id = getattr(context, "state", {}).get("current_tool_call_id", self.name)
+        tool_call_id = _current_tool_call_id.get() or getattr(context, "state", {}).get("current_tool_call_id", self.name)
         request = ApprovalRequest(
             request_id=str(tool_call_id),
             tool_name=self.name,

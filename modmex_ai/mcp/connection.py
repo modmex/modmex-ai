@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from modmex_ai.http.async_client import AsyncHttpClient
 from modmex_ai.mcp.client import MCPClient
 from modmex_ai.mcp.tools import RemoteTool
@@ -99,15 +101,16 @@ class MCPClientManager:
         self.active_connections: list[MCPClientConnection] = []
 
     async def connect(self) -> list[MCPClientConnection]:
-        connected: list[MCPClientConnection] = []
+        tasks = [asyncio.create_task(connection.connect()) for connection in self.connections]
         try:
-            for connection in self.connections:
-                await connection.connect()
-                connected.append(connection)
-        except Exception:
-            await self._close_connections(reversed(connected))
+            await asyncio.gather(*tasks)
+        except BaseException:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            await self._close_connections(reversed(self.connections))
             raise
-        self.active_connections = connected
+        self.active_connections = list(self.connections)
         return list(self.active_connections)
 
     @property

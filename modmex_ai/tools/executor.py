@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from modmex_ai.errors import UnknownToolError
 from modmex_ai.models import ToolCall
-from modmex_ai.tools.tool import Tool, ToolResult
+from modmex_ai.tools.tool import Tool, ToolResult, _current_tool_call_id
 
 
 class ToolExecutor:
@@ -19,9 +19,11 @@ class ToolExecutor:
         state = getattr(context, "state", None)
         if state is not None:
             state["current_tool_call_id"] = tool_call.tool_call_id
+        token = _current_tool_call_id.set(tool_call.tool_call_id)
         try:
             return ToolResult(tool_call_id=tool_call.tool_call_id, name=tool_call.name, output=tool.run(tool_call.arguments, context=context))
         finally:
+            _current_tool_call_id.reset(token)
             if state is not None:
                 state.pop("current_tool_call_id", None)
 
@@ -34,11 +36,8 @@ class ToolExecutor:
         tool = self.tools.get(tool_call.name)
         if tool is None:
             raise UnknownToolError(f"Unknown tool: {tool_call.name}")
-        state = getattr(context, "state", None)
-        if state is not None:
-            state["current_tool_call_id"] = tool_call.tool_call_id
+        token = _current_tool_call_id.set(tool_call.tool_call_id)
         try:
             return ToolResult(tool_call_id=tool_call.tool_call_id, name=tool_call.name, output=await tool.arun(tool_call.arguments, context=context))
         finally:
-            if state is not None:
-                state.pop("current_tool_call_id", None)
+            _current_tool_call_id.reset(token)

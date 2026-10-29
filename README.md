@@ -371,3 +371,18 @@ The client supports MCP `2026-07-28`, pagination, structured tool results,
 modern metadata/headers and buffered SSE responses. It does not create
 transport sessions. The MCP server transport and Lambda/API Gateway
 integration are provided by `modmex-lambda`.
+
+### Concurrent MCP discovery and tool calls
+
+Async agent runs and `MCPClientManager` connect to MCP servers concurrently.
+Each connection caches its tool catalog. Discovery and cursor pagination within
+one server stay ordered.
+
+Set `Agent(..., parallel_tool_calls=True)` to execute the tool calls returned in
+one model response concurrently in `run_async` and `arun_stream`. The default is
+`False`. Enable this for independent async tools, including MCP calls; synchronous
+functions still run on the event loop. Tools share the run context, so avoid
+parallel calls that depend on each other's results or mutate the same state.
+Streaming progress and finish events arrive as tools produce them; results sent
+back to the model retain the original call order. A failed or cancelled batch
+cancels and awaits its remaining tasks. Synchronous runs remain sequential.

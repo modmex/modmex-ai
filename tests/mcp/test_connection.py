@@ -94,3 +94,60 @@ def test_manager_closes_connected_connections_when_a_later_connection_fails() ->
         assert not second.connected
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("use_manager", [False, True])
+def test_discovery_overlaps_between_servers(use_manager):
+    async def run():
+        from modmex_ai.mcp import MCPClientManager
+        started = set()
+        ready = asyncio.Event()
+
+        class ConcurrentHttp(ConnectionHttp):
+            async def post_json(self, url, **kwargs):
+                if kwargs["data"]["method"] == "server/discover":
+                    started.add(url)
+                    if len(started) == 2:
+                        ready.set()
+                    await asyncio.wait_for(ready.wait(), 1)
+                response = await super().post_json(url, **kwargs)
+                if kwargs["data"]["method"] == "tools/list":
+                    response.body["result"]["tools"][0]["name"] = url
+                return response
+
+        connections = [MCPClientConnection(MCPClient(url, http=ConcurrentHttp())) for url in ("one", "two")]
+        if use_manager:
+            async with MCPClientManager(connections):
+                assert all(connection.connected for connection in connections)
+        else:
+            agent = Agent(name="test", instructions="", mcp_clients=connections,
+                          model=FakeModel([ModelResponse(output_text="done")]))
+            await agent.run_async("go")
+            assert len(agent.tools) == 2
+
+    asyncio.run(run())
+
+
+def test_client_validates_ids_for_overlapping_requests():
+    async def run():
+        ready = asyncio.Event()
+        requests = []
+
+        class ConcurrentHttp:
+            async def post_json(self, url, *, headers, data, **kwargs):
+                requests.append(data)
+                if len(requests) == 2:
+                    ready.set()
+                await ready.wait()
+                if data["id"] == 1:
+                    await asyncio.sleep(0.01)
+                return HttpResponse(status_code=200, headers={}, body={
+                    "jsonrpc": "2.0", "id": data["id"],
+                    "result": {"structuredContent": data["params"]["name"]},
+                })
+
+        client = MCPClient("test", http=ConcurrentHttp())
+        assert await asyncio.gather(client.call_tool("one"), client.call_tool("two")) == ["one", "two"]
+        assert [request["id"] for request in requests] == [1, 2]
+
+    asyncio.run(run())
