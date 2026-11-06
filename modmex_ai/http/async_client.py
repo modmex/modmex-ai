@@ -5,7 +5,13 @@ import importlib.util
 from collections.abc import AsyncIterator
 from typing import Any
 
-from modmex_ai.errors import ModelTimeoutError, ProviderError, RateLimitError
+from modmex_ai.errors import (
+    ModelTimeoutError,
+    ProviderError,
+    RateLimitError,
+    RunTimeoutError,
+)
+from modmex_ai.budget import bounded_timeout, bounded_await
 from modmex_ai.http.client import HttpResponse
 from modmex_ai.http.retries import RetryConfig
 
@@ -105,6 +111,7 @@ class AsyncHttpClient:
         raise_for_status: bool = True,
     ) -> AsyncIterator[Any]:
         client = await self._get_client()
+        emitted = False
         for attempt in range(self.retry.attempts + 1):
             try:
                 if stream:
@@ -113,36 +120,46 @@ class AsyncHttpClient:
                         url,
                         headers=headers,
                         json=data,
-                        timeout=timeout or self.timeout,
+                        timeout=bounded_timeout(
+                            timeout if timeout is not None else self.timeout
+                        ),
                     ) as response:
                         if raise_for_status:
                             response.raise_for_status()
+                        emitted = True
                         yield response
                 else:
                     response = await client.post(
                         url,
                         headers=headers,
                         json=data,
-                        timeout=timeout or self.timeout,
+                        timeout=bounded_timeout(
+                            timeout if timeout is not None else self.timeout
+                        ),
                     )
                     if raise_for_status:
                         response.raise_for_status()
                     yield HttpResponse(
                         status_code=response.status_code,
                         headers=dict(response.headers),
-                        body=(response.text if "text/event-stream" in response.headers.get("content-type", "").lower() else response.json()) if response.content else {},
+                        body=(
+                            response.text
+                            if "text/event-stream"
+                            in response.headers.get("content-type", "").lower()
+                            else response.json()
+                        )
+                        if response.content
+                        else {},
                     )
                 return
-            except asyncio.CancelledError:
+            except (asyncio.CancelledError, RunTimeoutError):
                 raise
             except Exception as error:
                 provider_error = _provider_error(error)
-                if (
-                    provider_error.status_code not in self.retry.status_codes
-                    or attempt >= self.retry.attempts
-                ):
+                delay = None if emitted else self.retry.delay(provider_error, attempt)
+                if delay is None:
                     raise provider_error
-                await asyncio.sleep(self.retry.backoff_seconds * (2**attempt))
+                await bounded_await(asyncio.sleep(delay))
 
     async def _get_client(self) -> Any:
         if self._closed:
@@ -176,7 +193,8 @@ def _provider_error(error: Exception) -> ProviderError:
         return error_cls(
             f"Provider returned HTTP {response.status_code}",
             status_code=response.status_code,
-            request_id=response.headers.get("x-request-id") or response.headers.get("request-id"),
+            request_id=response.headers.get("x-request-id")
+            or response.headers.get("request-id"),
             response_body=body,
             headers=dict(response.headers),
         )

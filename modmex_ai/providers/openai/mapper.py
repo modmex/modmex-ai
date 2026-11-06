@@ -58,7 +58,9 @@ def to_responses_payload(request: ModelRequest, model: str) -> dict[str, Any]:
     return payload
 
 
-def from_responses_payload(payload: dict[str, Any], *, headers: dict[str, str], status_code: int, model: str) -> ModelResponse:
+def from_responses_payload(
+    payload: dict[str, Any], *, headers: dict[str, str], status_code: int, model: str
+) -> ModelResponse:
     tool_calls: list[ToolCall] = []
     output_text_parts: list[str] = []
     for item in payload.get("output", []):
@@ -123,7 +125,9 @@ def to_chat_payload(request: ModelRequest, model: str) -> dict[str, Any]:
     return payload
 
 
-def from_chat_payload(payload: dict[str, Any], *, headers: dict[str, str], status_code: int, model: str) -> ModelResponse:
+def from_chat_payload(
+    payload: dict[str, Any], *, headers: dict[str, str], status_code: int, model: str
+) -> ModelResponse:
     choice = (payload.get("choices") or [{}])[0]
     message = choice.get("message") or {}
     tool_calls = [
@@ -165,7 +169,9 @@ def chat_stream_events(
         content = delta.get("content")
         if isinstance(content, str) and content:
             text_parts.append(content)
-            yield ModelStreamEvent(type=ModelStreamEventType.TEXT_DELTA, text_delta=content, raw=payload)
+            yield ModelStreamEvent(
+                type=ModelStreamEventType.TEXT_DELTA, text_delta=content, raw=payload
+            )
         for call in delta.get("tool_calls") or []:
             index = call.get("index", 0)
             state = calls.setdefault(index, {"id": "", "name": "", "arguments": ""})
@@ -185,7 +191,14 @@ def chat_stream_events(
             )
     response = ModelResponse(
         output_text="".join(text_parts) or None,
-        tool_calls=[ToolCall(tool_call_id=value["id"], name=value["name"], arguments=value["arguments"] or "{}") for value in calls.values()],
+        tool_calls=[
+            ToolCall(
+                tool_call_id=value["id"],
+                name=value["name"],
+                arguments=value["arguments"] or "{}",
+            )
+            for value in calls.values()
+        ],
         raw=raw_payloads,
         headers=headers,
         status_code=status_code,
@@ -214,23 +227,52 @@ def responses_stream_events(
             delta = event.get("delta", "")
             if delta:
                 text_parts.append(delta)
-                yield ModelStreamEvent(type=ModelStreamEventType.TEXT_DELTA, text_delta=delta, raw=event)
+                yield ModelStreamEvent(
+                    type=ModelStreamEventType.TEXT_DELTA, text_delta=delta, raw=event
+                )
         elif event_type == "response.function_call_arguments.delta":
             key = event.get("call_id") or event.get("item_id") or ""
-            state = calls.setdefault(key, {"id": key, "name": event.get("name", ""), "arguments": ""})
+            state = calls.setdefault(
+                key, {"id": key, "name": event.get("name", ""), "arguments": ""}
+            )
             state["name"] = event.get("name") or state["name"]
             delta = event.get("delta", "")
             state["arguments"] += delta
-            yield ModelStreamEvent(type=ModelStreamEventType.TOOL_CALL_DELTA, tool_call=ToolCall(tool_call_id=state["id"], name=state["name"], arguments=delta), raw=event)
+            yield ModelStreamEvent(
+                type=ModelStreamEventType.TOOL_CALL_DELTA,
+                tool_call=ToolCall(
+                    tool_call_id=state["id"], name=state["name"], arguments=delta
+                ),
+                raw=event,
+            )
         elif event_type == "response.function_call_arguments.done":
             key = event.get("call_id") or event.get("item_id") or ""
             state = calls.setdefault(key, {"id": key, "name": "", "arguments": ""})
             state["name"] = event.get("name") or state["name"]
             state["arguments"] = event.get("arguments") or state["arguments"]
-        elif event_type == "response.completed" and isinstance(event.get("response"), dict):
-            completed = from_responses_payload(event["response"], headers=headers, status_code=status_code, model=model)
+        elif event_type == "response.completed" and isinstance(
+            event.get("response"), dict
+        ):
+            completed = from_responses_payload(
+                event["response"], headers=headers, status_code=status_code, model=model
+            )
     if completed is None:
-        completed = ModelResponse(output_text="".join(text_parts) or None, tool_calls=[ToolCall(tool_call_id=value["id"], name=value["name"], arguments=value["arguments"] or "{}") for value in calls.values()], raw=raw_payloads, headers=headers, status_code=status_code, provider="openai", model=model)
+        completed = ModelResponse(
+            output_text="".join(text_parts) or None,
+            tool_calls=[
+                ToolCall(
+                    tool_call_id=value["id"],
+                    name=value["name"],
+                    arguments=value["arguments"] or "{}",
+                )
+                for value in calls.values()
+            ],
+            raw=raw_payloads,
+            headers=headers,
+            status_code=status_code,
+            provider="openai",
+            model=model,
+        )
     yield ModelStreamEvent.completed(completed)
 
 
@@ -319,7 +361,9 @@ async def responses_stream_events_async(
                 )
         elif event_type == "response.function_call_arguments.delta":
             key = event.get("call_id") or event.get("item_id") or ""
-            state = calls.setdefault(key, {"id": key, "name": event.get("name", ""), "arguments": ""})
+            state = calls.setdefault(
+                key, {"id": key, "name": event.get("name", ""), "arguments": ""}
+            )
             state["name"] = event.get("name") or state["name"]
             delta = event.get("delta", "")
             state["arguments"] += delta
@@ -337,7 +381,9 @@ async def responses_stream_events_async(
             state = calls.setdefault(key, {"id": key, "name": "", "arguments": ""})
             state["name"] = event.get("name") or state["name"]
             state["arguments"] = event.get("arguments") or state["arguments"]
-        elif event_type == "response.completed" and isinstance(event.get("response"), dict):
+        elif event_type == "response.completed" and isinstance(
+            event.get("response"), dict
+        ):
             completed = from_responses_payload(
                 event["response"],
                 headers=headers,
@@ -364,7 +410,9 @@ async def responses_stream_events_async(
     yield ModelStreamEvent.completed(completed)
 
 
-def tool_results_to_responses_input(tool_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def tool_results_to_responses_input(
+    tool_results: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     return [
         {
             "type": "function_call_output",
@@ -433,7 +481,9 @@ def _nullable_type(value: Any) -> Any:
     return [value, "null"]
 
 
-def _strict_property_schema(schema: dict[str, Any], *, required: bool) -> dict[str, Any]:
+def _strict_property_schema(
+    schema: dict[str, Any], *, required: bool
+) -> dict[str, Any]:
     if required:
         return schema
     if "type" in schema:
@@ -462,8 +512,7 @@ def _input_items_for_provider_state(
     if state is None or not state.previous_response_id:
         return input_items
     tool_outputs = [
-        item for item in input_items
-        if item.get("type") == "function_call_output"
+        item for item in input_items if item.get("type") == "function_call_output"
     ]
     return tool_outputs or input_items
 
@@ -484,7 +533,9 @@ def _provider_state_from_response(payload: dict[str, Any]) -> ProviderState | No
     )
 
 
-def _split_instructions(messages: list[Message | SessionItem]) -> tuple[str | None, list[dict[str, Any]]]:
+def _split_instructions(
+    messages: list[Message | SessionItem],
+) -> tuple[str | None, list[dict[str, Any]]]:
     instructions: list[str] = []
     input_items: list[dict[str, Any]] = []
     for item in messages:
@@ -621,7 +672,9 @@ def _responses_content(content: Any, *, role: str = "user") -> list[dict[str, An
         parts = [_responses_content_part(part) for part in _content_inputs(content)]
     if role == "assistant":
         if any(part["type"] != "input_text" for part in parts):
-            raise ValueError("OpenAI Responses assistant messages support text output only.")
+            raise ValueError(
+                "OpenAI Responses assistant messages support text output only."
+            )
         return [{"type": "output_text", "text": part["text"]} for part in parts]
     return parts
 
@@ -662,7 +715,9 @@ def _chat_content(content: Any) -> str:
 
 def _content_inputs(content: Any) -> list[TextInput | FileInput | ImageInput]:
     if not isinstance(content, list):
-        raise ValueError("Multimodal message content must be a list of typed input parts.")
+        raise ValueError(
+            "Multimodal message content must be a list of typed input parts."
+        )
     return [_content_input(part) for part in content]
 
 
@@ -677,7 +732,9 @@ def _content_input(value: Any) -> TextInput | FileInput | ImageInput:
             return FileInput(**value)
         if part_type == "image":
             return ImageInput(**value)
-    raise ValueError("Message content parts must be TextInput, FileInput, or ImageInput.")
+    raise ValueError(
+        "Message content parts must be TextInput, FileInput, or ImageInput."
+    )
 
 
 def _data_url(data: str | bytes, media_type: str | None) -> str:
@@ -692,6 +749,17 @@ def _apply_responses_settings(payload: dict[str, Any], request: ModelRequest) ->
     settings = request.settings
     if not settings:
         return
+    if settings.reasoning_effort is not None:
+        if settings.reasoning_effort not in {
+            "none",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+        }:
+            raise ValueError("Invalid reasoning_effort")
+        payload["reasoning"] = {"effort": settings.reasoning_effort}
     if settings.temperature is not None:
         payload["temperature"] = settings.temperature
     if settings.top_p is not None:
@@ -704,6 +772,17 @@ def _apply_chat_settings(payload: dict[str, Any], request: ModelRequest) -> None
     settings = request.settings
     if not settings:
         return
+    if settings.reasoning_effort is not None:
+        if settings.reasoning_effort not in {
+            "none",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+        }:
+            raise ValueError("Invalid reasoning_effort")
+        payload["reasoning_effort"] = settings.reasoning_effort
     if settings.temperature is not None:
         payload["temperature"] = settings.temperature
     if settings.top_p is not None:

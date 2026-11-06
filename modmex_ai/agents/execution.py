@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
+from time import perf_counter
+from modmex_ai.budget import remaining_seconds
+from modmex_ai.schemas import dumps
 from typing import TYPE_CHECKING, Any
 
 from modmex_ai.agents.context import RunContext
@@ -8,7 +12,14 @@ from modmex_ai.agents.handoff import find_handoff
 from modmex_ai.agents.result import AgentResult
 from modmex_ai.errors import MaxToolCallsExceeded
 from modmex_ai.messages import Message
-from modmex_ai.models import ModelClient, ModelRequest, ModelResponse, ProviderState, ToolCall, Usage
+from modmex_ai.models import (
+    ModelClient,
+    ModelRequest,
+    ModelResponse,
+    ProviderState,
+    ToolCall,
+    Usage,
+)
 from modmex_ai.sessions import SessionItem
 from modmex_ai.tools import ToolExecutor, ToolResult
 
@@ -45,7 +56,7 @@ class AgentExecution:
             input,
             include_output_schema_prompt=not self.model.profile.supports_structured_output,
         )
-        self.executor = ToolExecutor(agent.tools)
+        self.executor = ToolExecutor(agent.tools, error_policy=agent.tool_error_policy)
         self.tool_schemas = [*self.executor.schemas(), *agent._handoff_schemas()]
         self.output_schema = agent._output_schema()
         self.tool_call_count = 0
@@ -55,10 +66,16 @@ class AgentExecution:
         self.provider_state = provider_state
 
     def next_request(self) -> ModelRequest:
+        remaining_seconds()
+        self._model_started = perf_counter()
+        self._first_fragment = False
         self.context.trace.add(
             "model_request",
             self.agent.name,
             tools=[tool["name"] for tool in self.tool_schemas],
+            message_count=len(self.messages),
+            context_bytes=len(dumps(self.messages).encode("utf-8")),
+            tool_schema_bytes=len(dumps(self.tool_schemas).encode("utf-8")),
         )
         return ModelRequest(
             messages=self.messages,
@@ -69,7 +86,30 @@ class AgentExecution:
             provider_state=self.provider_state,
         )
 
+    @contextmanager
+    def model_call(self):
+        try:
+            yield
+        except BaseException as error:
+            self.context.trace.add(
+                "model_error",
+                self.agent.name,
+                error_type=type(error).__name__,
+                duration_ms=(perf_counter() - self._model_started) * 1000,
+            )
+            raise
+
+    def observe_fragment(self) -> None:
+        if not self._first_fragment:
+            self._first_fragment = True
+            self.context.trace.add(
+                "model_first_fragment",
+                self.agent.name,
+                duration_ms=(perf_counter() - self._model_started) * 1000,
+            )
+
     def accept_response(self, response: ModelResponse) -> AgentExecutionStep:
+        remaining_seconds()
         if response.provider_state is not None:
             self.provider_state = response.provider_state
         self.usage.add(response.usage)
@@ -77,6 +117,7 @@ class AgentExecution:
             "model_response",
             self.agent.name,
             request_id=response.request_id,
+            duration_ms=(perf_counter() - self._model_started) * 1000,
             tool_calls=[call.name for call in response.tool_calls],
             usage=response.usage,
         )
@@ -116,49 +157,57 @@ class AgentExecution:
         nested_usage = self.context.state.pop("__modmex_ai_nested_usage", None)
         if nested_usage:
             self.usage.add(nested_usage)
-        self.context.trace.add("tool_call", result.name, tool_call_id=result.tool_call_id)
+        self.context.trace.add(
+            "tool_call", result.name, tool_call_id=result.tool_call_id
+        )
         self.messages.append(item)
 
     def _tool_step(self, tool_calls: list[ToolCall]) -> AgentExecutionStep:
         self.tool_call_count += len(tool_calls)
         if self.tool_call_count > self.agent.max_tool_calls:
-            raise MaxToolCallsExceeded(f"Agent {self.agent.name!r} exceeded max_tool_calls")
+            raise MaxToolCallsExceeded(
+                f"Agent {self.agent.name!r} exceeded max_tool_calls"
+            )
         for tool_call in tool_calls:
             handoff = find_handoff(tool_call, self.agent.handoffs)
             if handoff is None:
                 continue
             handoff_input = handoff.invoke(self.context, tool_call.arguments)
-            self.generated_items.extend([
-                SessionItem(
-                    type="handoff_call",
-                    tool_call_id=tool_call.tool_call_id,
-                    name=handoff.name,
-                    arguments=tool_call.arguments,
-                ),
-                SessionItem(
-                    type="handoff_call_output",
-                    tool_call_id=tool_call.tool_call_id,
-                    name=handoff.name,
-                    output={"transferred": True},
-                ),
-            ])
+            self.generated_items.extend(
+                [
+                    SessionItem(
+                        type="handoff_call",
+                        tool_call_id=tool_call.tool_call_id,
+                        name=handoff.name,
+                        arguments=tool_call.arguments,
+                    ),
+                    SessionItem(
+                        type="handoff_call_output",
+                        tool_call_id=tool_call.tool_call_id,
+                        name=handoff.name,
+                        output={"transferred": True},
+                    ),
+                ]
+            )
             self.context.trace.add(
                 "handoff_call",
                 handoff.name,
                 tool_call_id=tool_call.tool_call_id,
                 to=handoff.agent,
             )
-            return AgentExecutionStep(result=AgentResult(
-                output=None,
-                agent=self.agent.name,
-                handoff_target=handoff.agent,
-                handoff_name=handoff.name,
-                handoff_input=handoff_input,
-                usage=self.usage,
-                items=self.generated_items,
-                provider_state=self.provider_state,
-                trace=self.context.trace,
-            ))
+            return AgentExecutionStep(
+                result=AgentResult(
+                    output=None,
+                    agent=self.agent.name,
+                    handoff_target=handoff.agent,
+                    handoff_name=handoff.name,
+                    handoff_input=handoff_input,
+                    usage=self.usage,
+                    items=self.generated_items,
+                    provider_state=self.provider_state,
+                    trace=self.context.trace,
+                )
+            )
         return AgentExecutionStep(tool_calls=tool_calls)
 
     def _result(self, *, output: Any) -> AgentResult:

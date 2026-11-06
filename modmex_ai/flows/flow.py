@@ -400,7 +400,7 @@ class Flow:
         run_context = RunContext(input=None, context=context, metadata=metadata or {}, trace=Trace())
         run_context.state["approval_policy"] = approval_policy
         run_context.state["approval_decisions"] = {decision.request_id: decision}
-        result = ToolExecutor(agent.tools).execute(suspension.pending_tool_call, context=run_context)
+        result = ToolExecutor(agent.tools, error_policy=agent.tool_error_policy).execute(suspension.pending_tool_call, context=run_context)
         output_item = SessionItem(
             type="function_call_output",
             tool_call_id=result.tool_call_id,
@@ -438,7 +438,7 @@ class Flow:
         run_context = RunContext(input=None, context=context, metadata=metadata or {}, trace=Trace())
         run_context.state["approval_policy"] = approval_policy
         run_context.state["approval_decisions"] = {decision.request_id: decision}
-        result = await ToolExecutor(agent.tools).execute_async(suspension.pending_tool_call, context=run_context)
+        result = await ToolExecutor(agent.tools, error_policy=agent.tool_error_policy).execute_async(suspension.pending_tool_call, context=run_context)
         output_item = SessionItem(
             type="function_call_output",
             tool_call_id=result.tool_call_id,

@@ -8,6 +8,10 @@ from modmex import BaseModel
 
 TraceStepType = Literal[
     "model_request",
+    "context_compaction",
+    "model_first_fragment",
+    "model_error",
+    "tool_execution",
     "model_response",
     "tool_call",
     "handoff_call",

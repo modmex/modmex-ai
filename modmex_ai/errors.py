@@ -27,6 +27,10 @@ class ModelTimeoutError(ProviderError):
     pass
 
 
+class RunTimeoutError(ModmexAIError):
+    """The execution deadline expired; writes may have completed before timeout."""
+
+
 class ToolValidationError(ModmexAIError):
     pass
 
