@@ -87,6 +87,9 @@ def from_responses_payload(
         provider="openai",
         model=model,
         provider_state=_provider_state_from_response(payload),
+        compaction_count=sum(
+            1 for item in payload.get("output", []) if item.get("type") == "compaction"
+        ),
     )
 
 
@@ -499,9 +502,12 @@ def _strict_property_schema(
 def _apply_provider_state(payload: dict[str, Any], state: ProviderState | None) -> None:
     if state is None:
         return
-    if state.previous_response_id:
+    if state.provider not in {None, "openai"}:
+        raise ValueError("Provider state does not belong to OpenAI")
+    mode = state.resolved_mode
+    if mode == "response_chain" and state.previous_response_id:
         payload["previous_response_id"] = state.previous_response_id
-    if state.conversation_id:
+    elif mode == "conversation":
         payload["conversation"] = state.conversation_id
 
 
@@ -509,12 +515,11 @@ def _input_items_for_provider_state(
     input_items: list[dict[str, Any]],
     state: ProviderState | None,
 ) -> list[dict[str, Any]]:
-    if state is None or not state.previous_response_id:
-        return input_items
-    tool_outputs = [
-        item for item in input_items if item.get("type") == "function_call_output"
-    ]
-    return tool_outputs or input_items
+    # The runner owns the pending-input cursor. Direct adapter callers must supply
+    # only new input when using remote state; never infer newness from item type.
+    if state is not None:
+        state.resolved_mode
+    return input_items
 
 
 def _provider_state_from_response(payload: dict[str, Any]) -> ProviderState | None:
@@ -528,7 +533,8 @@ def _provider_state_from_response(payload: dict[str, Any]) -> ProviderState | No
         return None
     return ProviderState(
         provider="openai",
-        previous_response_id=response_id,
+        mode="conversation" if conversation_id else "response_chain",
+        previous_response_id=None if conversation_id else response_id,
         conversation_id=conversation_id,
     )
 
@@ -540,6 +546,9 @@ def _split_instructions(
     input_items: list[dict[str, Any]] = []
     for item in messages:
         if isinstance(item, SessionItem):
+            if item.type == "message" and item.role in {"system", "developer"}:
+                instructions.append(_instructions_payload(item.content))
+                continue
             operation = _operation_input_item(item)
             if operation is not None:
                 input_items.append(operation)
@@ -749,6 +758,33 @@ def _apply_responses_settings(payload: dict[str, Any], request: ModelRequest) ->
     settings = request.settings
     if not settings:
         return
+    if settings.parallel_tool_calls is not None:
+        payload["parallel_tool_calls"] = settings.parallel_tool_calls
+    if settings.openai is not None:
+        threshold = settings.openai.compact_threshold
+        if threshold is not None:
+            if (
+                isinstance(threshold, bool)
+                or not isinstance(threshold, int)
+                or threshold <= 0
+            ):
+                raise ValueError(
+                    "compact_threshold must be a positive integer token count"
+                )
+            if (
+                request.provider_state is None
+                or request.provider_state.resolved_mode != "response_chain"
+            ):
+                raise ValueError(
+                    "Native compaction currently requires explicit response_chain state"
+                )
+            payload["context_management"] = [
+                {"type": "compaction", "compact_threshold": threshold}
+            ]
+        if settings.openai.prompt_cache_key is not None:
+            payload["prompt_cache_key"] = settings.openai.prompt_cache_key
+        if settings.openai.prompt_cache_retention is not None:
+            payload["prompt_cache_retention"] = settings.openai.prompt_cache_retention
     if settings.reasoning_effort is not None:
         if settings.reasoning_effort not in {
             "none",
@@ -772,6 +808,17 @@ def _apply_chat_settings(payload: dict[str, Any], request: ModelRequest) -> None
     settings = request.settings
     if not settings:
         return
+    if settings.parallel_tool_calls is not None:
+        payload["parallel_tool_calls"] = settings.parallel_tool_calls
+    if settings.openai is not None:
+        if settings.openai.compact_threshold is not None:
+            raise ValueError(
+                "Native compaction requires Responses API, not Chat Completions"
+            )
+        if settings.openai.prompt_cache_key is not None:
+            payload["prompt_cache_key"] = settings.openai.prompt_cache_key
+        if settings.openai.prompt_cache_retention is not None:
+            payload["prompt_cache_retention"] = settings.openai.prompt_cache_retention
     if settings.reasoning_effort is not None:
         if settings.reasoning_effort not in {
             "none",

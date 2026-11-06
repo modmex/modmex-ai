@@ -31,6 +31,7 @@ from modmex_ai.models import (
     ModelStreamEvent,
     ModelStreamEventType,
     ModelSettings,
+    OpenAISettings,
     ProviderState,
     ToolCall,
     Usage,
@@ -118,6 +119,7 @@ from modmex_ai.voice import (
 )
 
 __all__ = [
+    "OpenAISettings",
     "ContextCompactor",
     "CompactionResult",
     "CompactionSnapshot",

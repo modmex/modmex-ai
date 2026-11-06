@@ -25,12 +25,46 @@ from modmex_ai.models import ModelStreamEventType, ProviderState
 
 
 def test_chat_stream_mapper_emits_text_tool_deltas_and_a_completed_response():
-    events = list(chat_stream_events([
-        {"choices": [{"delta": {"content": "Hel"}}]},
-        {"choices": [{"delta": {"content": "lo"}}]},
-        {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call-1", "function": {"name": "lookup", "arguments": "{\"x\":"}}]}}]},
-        {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": "1}"}}]}}]},
-    ], headers={}, status_code=200, model="gpt-test"))
+    events = list(
+        chat_stream_events(
+            [
+                {"choices": [{"delta": {"content": "Hel"}}]},
+                {"choices": [{"delta": {"content": "lo"}}]},
+                {
+                    "choices": [
+                        {
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": "call-1",
+                                        "function": {
+                                            "name": "lookup",
+                                            "arguments": '{"x":',
+                                        },
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                },
+                {
+                    "choices": [
+                        {
+                            "delta": {
+                                "tool_calls": [
+                                    {"index": 0, "function": {"arguments": "1}"}}
+                                ]
+                            }
+                        }
+                    ]
+                },
+            ],
+            headers={},
+            status_code=200,
+            model="gpt-test",
+        )
+    )
 
     assert [event.type for event in events] == [
         ModelStreamEventType.TEXT_DELTA,
@@ -44,11 +78,34 @@ def test_chat_stream_mapper_emits_text_tool_deltas_and_a_completed_response():
 
 
 def test_responses_stream_mapper_emits_typed_deltas_and_uses_completed_response():
-    events = list(responses_stream_events([
-        {"type": "response.output_text.delta", "delta": "Hello"},
-        {"type": "response.function_call_arguments.delta", "call_id": "call-1", "name": "lookup", "delta": "{}"},
-        {"type": "response.completed", "response": {"id": "resp-1", "output": [{"type": "message", "content": [{"type": "output_text", "text": "Hello"}]}]}},
-    ], headers={}, status_code=200, model="gpt-test"))
+    events = list(
+        responses_stream_events(
+            [
+                {"type": "response.output_text.delta", "delta": "Hello"},
+                {
+                    "type": "response.function_call_arguments.delta",
+                    "call_id": "call-1",
+                    "name": "lookup",
+                    "delta": "{}",
+                },
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp-1",
+                        "output": [
+                            {
+                                "type": "message",
+                                "content": [{"type": "output_text", "text": "Hello"}],
+                            }
+                        ],
+                    },
+                },
+            ],
+            headers={},
+            status_code=200,
+            model="gpt-test",
+        )
+    )
 
     assert [event.type for event in events] == [
         ModelStreamEventType.TEXT_DELTA,
@@ -57,6 +114,8 @@ def test_responses_stream_mapper_emits_typed_deltas_and_uses_completed_response(
     ]
     assert events[-1].response.output_text == "Hello"
     assert events[-1].response.provider_state.previous_response_id == "resp-1"
+
+
 from modmex_ai.schemas import schema_for_model
 from modmex_ai.sessions import SessionItem
 
@@ -114,7 +173,9 @@ def test_responses_mapper_translates_neutral_multimodal_inputs_to_official_parts
                         filename="carrier-packet.pdf",
                         detail=InputDetail.HIGH,
                     ),
-                    ImageInput(data="YWJj", media_type="image/png", detail=InputDetail.LOW),
+                    ImageInput(
+                        data="YWJj", media_type="image/png", detail=InputDetail.LOW
+                    ),
                 ],
             )
         ]
@@ -126,7 +187,10 @@ def test_responses_mapper_translates_neutral_multimodal_inputs_to_official_parts
         {
             "role": "user",
             "content": [
-                {"type": "input_text", "text": "Extract the carrier name from this document."},
+                {
+                    "type": "input_text",
+                    "text": "Extract the carrier name from this document.",
+                },
                 {
                     "type": "input_file",
                     "file_url": "https://files.example/carrier-packet.pdf",
@@ -202,8 +266,9 @@ def test_openai_mapper_normalizes_strict_tool_schemas():
         "required": ["note"],
         "additionalProperties": False,
     }
-    assert chat_payload["tools"][0]["function"]["parameters"] == (
-        responses_payload["tools"][0]["parameters"]
+    assert (
+        chat_payload["tools"][0]["function"]["parameters"]
+        == (responses_payload["tools"][0]["parameters"])
     )
     assert responses_payload["tools"][0]["strict"] is True
     assert chat_payload["tools"][0]["function"]["strict"] is True
@@ -279,7 +344,9 @@ def test_openai_mapper_handles_tool_messages_settings_and_tool_calls():
     request = ModelRequest(
         messages=[
             Message(role="developer", content="Be precise."),
-            Message(role="tool", content='{"ok":true}', tool_call_id="call-1", name="lookup"),
+            Message(
+                role="tool", content='{"ok":true}', tool_call_id="call-1", name="lookup"
+            ),
         ],
         tools=[
             {
@@ -310,21 +377,25 @@ def test_openai_mapper_handles_tool_messages_settings_and_tool_calls():
 
 def test_responses_tool_output_is_always_serialized_as_text():
     payload = to_responses_payload(
-        ModelRequest(messages=[
-            Message(
-                role="tool",
-                content=[{"type": "output_text", "text": "done"}],
-                tool_call_id="call-1",
-            ),
-        ]),
+        ModelRequest(
+            messages=[
+                Message(
+                    role="tool",
+                    content=[{"type": "output_text", "text": "done"}],
+                    tool_call_id="call-1",
+                ),
+            ]
+        ),
         "gpt-test",
     )
 
-    assert payload["input"] == [{
-        "type": "function_call_output",
-        "call_id": "call-1",
-        "output": '[{"type":"output_text","text":"done"}]',
-    }]
+    assert payload["input"] == [
+        {
+            "type": "function_call_output",
+            "call_id": "call-1",
+            "output": '[{"type":"output_text","text":"done"}]',
+        }
+    ]
 
 
 def test_openai_mapper_includes_function_call_before_tool_output():
@@ -391,7 +462,10 @@ def test_openai_mapper_handles_session_message_and_handoff_items():
     ]
     assert chat_payload["messages"][0] == {"role": "user", "content": "hello"}
     assert chat_payload["messages"][1]["role"] == "assistant"
-    assert chat_payload["messages"][1]["tool_calls"][0]["function"]["name"] == "transfer_to_support"
+    assert (
+        chat_payload["messages"][1]["tool_calls"][0]["function"]["name"]
+        == "transfer_to_support"
+    )
 
 
 def test_openai_parsers_handle_text_and_chat_tool_calls():
@@ -415,7 +489,10 @@ def test_openai_parsers_handle_text_and_chat_tool_calls():
                         "tool_calls": [
                             {
                                 "id": "call-1",
-                                "function": {"name": "lookup", "arguments": '{"id":"1"}'},
+                                "function": {
+                                    "name": "lookup",
+                                    "arguments": '{"id":"1"}',
+                                },
                             }
                         ]
                     }
@@ -433,9 +510,11 @@ def test_openai_parsers_handle_text_and_chat_tool_calls():
 
 
 def test_tool_results_to_responses_input_serializes_outputs():
-    result = tool_results_to_responses_input([
-        {"tool_call_id": "call-1", "output": {"ok": True}},
-    ])
+    result = tool_results_to_responses_input(
+        [
+            {"tool_call_id": "call-1", "output": {"ok": True}},
+        ]
+    )
 
     assert result == [
         {
@@ -508,16 +587,18 @@ def test_openai_text_tools_can_opt_out_of_strict_mode():
     request = ModelRequest(
         messages=[Message(role="user", content="hello")],
         tool_strict=False,
-        tools=[{
-            "name": "record",
-            "description": "",
-            "parameters": {
-                "type": "object",
-                "properties": {"note": {"type": ["string", "null"]}},
-                "required": [],
-                "additionalProperties": False,
-            },
-        }],
+        tools=[
+            {
+                "name": "record",
+                "description": "",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"note": {"type": ["string", "null"]}},
+                    "required": [],
+                    "additionalProperties": False,
+                },
+            }
+        ],
     )
 
     assert to_responses_payload(request, "gpt-test")["tools"][0]["strict"] is False
@@ -527,38 +608,88 @@ def test_openai_text_tools_can_opt_out_of_strict_mode():
 
 
 def test_openai_mapper_normalizes_nested_schema_provider_state_and_incomplete_stream():
-    schema = _normalize_schema({
-        "type": "object",
-        "properties": {"items": {"type": "array", "items": {"type": "string", "nullable": True}}},
-        "oneOf": [{"type": "string"}],
-    })
+    schema = _normalize_schema(
+        {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {"type": "string", "nullable": True},
+                }
+            },
+            "oneOf": [{"type": "string"}],
+        }
+    )
     assert schema["required"] == ["items"]
     assert schema["properties"]["items"]["items"]["type"] == ["string", "null"]
     payload = {}
-    _apply_provider_state(payload, ProviderState(provider="openai", previous_response_id="r", conversation_id="c"))
-    assert payload == {"previous_response_id": "r", "conversation": "c"}
-    assert _input_items_for_provider_state([{"role": "user"}, {"type": "function_call_output"}], ProviderState(previous_response_id="r")) == [{"type": "function_call_output"}]
-    assert _provider_state_from_response({"conversation": {"id": "c"}}).conversation_id == "c"
-    events = list(responses_stream_events([
-        {"type": "response.function_call_arguments.done", "call_id": "tool", "name": "lookup", "arguments": "{}"},
-    ], headers={}, status_code=200, model="gpt"))
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        _apply_provider_state(
+            payload,
+            ProviderState(
+                provider="openai", previous_response_id="r", conversation_id="c"
+            ),
+        )
+    _apply_provider_state(
+        payload, ProviderState(provider="openai", previous_response_id="r")
+    )
+    assert payload == {"previous_response_id": "r"}
+    assert _input_items_for_provider_state(
+        [{"role": "user"}, {"type": "function_call_output"}],
+        ProviderState(previous_response_id="r"),
+    ) == [{"role": "user"}, {"type": "function_call_output"}]
+    assert (
+        _provider_state_from_response({"conversation": {"id": "c"}}).conversation_id
+        == "c"
+    )
+    events = list(
+        responses_stream_events(
+            [
+                {
+                    "type": "response.function_call_arguments.done",
+                    "call_id": "tool",
+                    "name": "lookup",
+                    "arguments": "{}",
+                },
+            ],
+            headers={},
+            status_code=200,
+            model="gpt",
+        )
+    )
     assert events[-1].response.tool_calls[0].name == "lookup"
 
 
-@pytest.mark.parametrize("message_type,content", [
-    (Message, "Previous reply"),
-    (Message, [TextInput(text="Previous reply")]),
-    (SessionItem, "Previous reply"),
-])
-def test_responses_history_uses_output_text_for_assistant_messages(message_type, content):
-    request = ModelRequest(messages=[
-        message_type(role="user", content="Initial question"),
-        message_type(role="assistant", content=content),
-        message_type(role="user", content="Follow-up question"),
-    ])
+@pytest.mark.parametrize(
+    "message_type,content",
+    [
+        (Message, "Previous reply"),
+        (Message, [TextInput(text="Previous reply")]),
+        (SessionItem, "Previous reply"),
+    ],
+)
+def test_responses_history_uses_output_text_for_assistant_messages(
+    message_type, content
+):
+    request = ModelRequest(
+        messages=[
+            message_type(role="user", content="Initial question"),
+            message_type(role="assistant", content=content),
+            message_type(role="user", content="Follow-up question"),
+        ]
+    )
     payload = to_responses_payload(request, "gpt-test")
     assert payload["input"] == [
-        {"role": "user", "content": [{"type": "input_text", "text": "Initial question"}]},
-        {"role": "assistant", "content": [{"type": "output_text", "text": "Previous reply"}]},
-        {"role": "user", "content": [{"type": "input_text", "text": "Follow-up question"}]},
+        {
+            "role": "user",
+            "content": [{"type": "input_text", "text": "Initial question"}],
+        },
+        {
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "Previous reply"}],
+        },
+        {
+            "role": "user",
+            "content": [{"type": "input_text", "text": "Follow-up question"}],
+        },
     ]

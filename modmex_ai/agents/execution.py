@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 from modmex_ai.agents.context import RunContext
 from modmex_ai.agents.handoff import find_handoff
 from modmex_ai.agents.result import AgentResult
-from modmex_ai.errors import MaxToolCallsExceeded
+from modmex_ai.errors import MaxToolCallsExceeded, UnknownToolError
 from modmex_ai.messages import Message
 from modmex_ai.models import (
     ModelClient,
@@ -58,28 +58,70 @@ class AgentExecution:
         )
         self.executor = ToolExecutor(agent.tools, error_policy=agent.tool_error_policy)
         self.tool_schemas = [*self.executor.schemas(), *agent._handoff_schemas()]
+        names = [schema["name"] for schema in self.tool_schemas]
+        if len(set(names)) != len(names) or len(self.executor.tools) != len(
+            agent.tools
+        ):
+            raise ValueError("Registered tools and handoffs must have unique names")
         self.output_schema = agent._output_schema()
         self.tool_call_count = 0
         self.output_guardrail_retry_count = 0
         self.usage = Usage()
         self.generated_items: list[SessionItem] = []
         self.provider_state = provider_state
+        if provider_state is not None:
+            provider_state.resolved_mode
+        self.pending_messages = list(self.messages)
 
     def next_request(self) -> ModelRequest:
         remaining_seconds()
         self._model_started = perf_counter()
         self._first_fragment = False
+        self._first_token = False
+        names = [schema["name"] for schema in self.tool_schemas]
+        selected = (
+            self.agent.tool_selector(self.context, list(names))
+            if self.agent.tool_selector
+            else names
+        )
+        if not isinstance(selected, (list, tuple)) or any(
+            not isinstance(name, str) for name in selected
+        ):
+            raise ValueError("tool_selector must return tool names")
+        if len(set(selected)) != len(selected) or not set(selected).issubset(names):
+            raise ValueError("tool_selector returned duplicate or unregistered names")
+        self.available_names = set(selected)
+        schemas = [
+            schema
+            for schema in self.tool_schemas
+            if schema["name"] in self.available_names
+        ]
+        messages = list(self.messages)
+        if self.provider_state and self.provider_state.has_remote_state:
+            instructions = [
+                item
+                for item in self.messages
+                if getattr(item, "role", None) in {"system", "developer"}
+            ]
+            messages = [
+                *instructions,
+                *[
+                    item
+                    for item in self.pending_messages
+                    if getattr(item, "role", None) not in {"system", "developer"}
+                ],
+            ]
         self.context.trace.add(
             "model_request",
             self.agent.name,
-            tools=[tool["name"] for tool in self.tool_schemas],
-            message_count=len(self.messages),
-            context_bytes=len(dumps(self.messages).encode("utf-8")),
-            tool_schema_bytes=len(dumps(self.tool_schemas).encode("utf-8")),
+            tools=[tool["name"] for tool in schemas],
+            message_count=len(messages),
+            context_bytes=len(dumps(messages).encode("utf-8")),
+            tool_schema_bytes=len(dumps(schemas).encode("utf-8")),
         )
         return ModelRequest(
-            messages=self.messages,
-            tools=self.tool_schemas,
+            messages=messages,
+            tools=schemas,
             output_schema=self.output_schema,
             output_strict=self.agent.output_strict,
             settings=self.agent.settings,
@@ -99,6 +141,15 @@ class AgentExecution:
             )
             raise
 
+    def observe_text(self) -> None:
+        if not self._first_token:
+            self._first_token = True
+            self.context.trace.add(
+                "model_first_token",
+                self.agent.name,
+                duration_ms=(perf_counter() - self._model_started) * 1000,
+            )
+
     def observe_fragment(self) -> None:
         if not self._first_fragment:
             self._first_fragment = True
@@ -110,8 +161,36 @@ class AgentExecution:
 
     def accept_response(self, response: ModelResponse) -> AgentExecutionStep:
         remaining_seconds()
-        if response.provider_state is not None:
-            self.provider_state = response.provider_state
+        explicit_mode = self.provider_state.mode if self.provider_state else None
+        if (
+            self.provider_state
+            and self.provider_state.resolved_mode == "response_chain"
+            and response.provider_state is None
+        ):
+            raise ValueError(
+                "Response chain requires a continuation state from the model"
+            )
+        if explicit_mode != "stateless" and response.provider_state is not None:
+            incoming = response.provider_state
+            incoming.resolved_mode
+            if (
+                self.provider_state
+                and self.provider_state.resolved_mode == "conversation"
+            ):
+                if (
+                    incoming.conversation_id
+                    and incoming.conversation_id != self.provider_state.conversation_id
+                ):
+                    raise ValueError(
+                        "Provider changed conversation_id during execution"
+                    )
+                # Some providers omit conversation in their response; retain the selected conversation.
+            elif explicit_mode == "response_chain" and incoming.conversation_id:
+                raise ValueError("Provider changed remote state mode")
+            else:
+                self.provider_state = incoming
+        if self.provider_state and self.provider_state.has_remote_state:
+            self.pending_messages.clear()
         self.usage.add(response.usage)
         self.context.trace.add(
             "model_response",
@@ -121,10 +200,20 @@ class AgentExecution:
             tool_calls=[call.name for call in response.tool_calls],
             usage=response.usage,
         )
+        if response.compaction_count:
+            self.context.trace.add(
+                "provider_compaction",
+                self.agent.name,
+                provider=response.provider,
+                count=response.compaction_count,
+                request_id=response.request_id,
+                usage=response.usage,
+            )
         if response.tool_calls:
             return self._tool_step(response.tool_calls)
 
         output = self.agent._parse_output(response.output_text)
+        before_guardrail = len(self.messages)
         if self.run_output_guardrails and self.agent._should_retry_output(
             output=output,
             response_text=response.output_text,
@@ -133,6 +222,11 @@ class AgentExecution:
             retry_count=self.output_guardrail_retry_count,
         ):
             self.output_guardrail_retry_count += 1
+            self.pending_messages.extend(
+                item
+                for item in self.messages[before_guardrail:]
+                if getattr(item, "role", None) != "assistant"
+            )
             return AgentExecutionStep()
         return AgentExecutionStep(result=self._result(output=output))
 
@@ -144,6 +238,13 @@ class AgentExecution:
             arguments=tool_call.arguments,
         )
         self.generated_items.append(item)
+        self.context.state["__modmex_ai_approval_checkpoint"] = {
+            "provider_state": self.provider_state,
+            "items": list(self.messages) + [item],
+            "pending": list(self.pending_messages)
+            if self.provider_state and self.provider_state.has_remote_state
+            else [],
+        }
         self.messages.append(item)
 
     def accept_tool_result(self, result: ToolResult) -> None:
@@ -161,8 +262,29 @@ class AgentExecution:
             "tool_call", result.name, tool_call_id=result.tool_call_id
         )
         self.messages.append(item)
+        self.pending_messages.append(item)
 
     def _tool_step(self, tool_calls: list[ToolCall]) -> AgentExecutionStep:
+        if len({call.tool_call_id for call in tool_calls}) != len(tool_calls):
+            raise ValueError("Duplicate tool call IDs in model response")
+        unavailable = [
+            call.name for call in tool_calls if call.name not in self.available_names
+        ]
+        if unavailable:
+            raise UnknownToolError(
+                "Model requested a tool not available for this inference"
+            )
+        handoff_calls = [
+            call for call in tool_calls if find_handoff(call, self.agent.handoffs)
+        ]
+        if handoff_calls and len(tool_calls) != 1:
+            raise ValueError("A handoff must be the sole tool call in a model response")
+        if len(tool_calls) > 1 and any(
+            self.executor.tools.get(call.name)
+            and self.executor.tools[call.name].requires_approval
+            for call in tool_calls
+        ):
+            raise ValueError("Approval-required tools must be requested one at a time")
         self.tool_call_count += len(tool_calls)
         if self.tool_call_count > self.agent.max_tool_calls:
             raise MaxToolCallsExceeded(
@@ -172,6 +294,14 @@ class AgentExecution:
             handoff = find_handoff(tool_call, self.agent.handoffs)
             if handoff is None:
                 continue
+            if (
+                handoff.input_filter is not None
+                and self.provider_state
+                and self.provider_state.has_remote_state
+            ):
+                raise ValueError(
+                    "Remote handoffs cannot apply local history filters; use stateless mode"
+                )
             handoff_input = handoff.invoke(self.context, tool_call.arguments)
             self.generated_items.extend(
                 [
