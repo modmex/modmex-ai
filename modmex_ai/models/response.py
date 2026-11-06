@@ -27,6 +27,7 @@ class ModelResponse(BaseModel):
     model: str | None = None
     provider_state: ProviderState | None = None
     latency_ms: float | None = None
+    compaction_count: int = 0
 
     @property
     def has_tool_calls(self) -> bool:

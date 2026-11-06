@@ -61,6 +61,7 @@ class Agent:
         max_tool_calls: int = 8,
         parallel_tool_calls: bool = False,
         tool_error_policy: str = "raise",
+        tool_selector: Any = None,
         execution_timeout: float | None = None,
         input_guardrails: list[InputGuardrail] | None = None,
         output_guardrails: list[OutputGuardrail] | None = None,
@@ -73,6 +74,7 @@ class Agent:
         ):
             raise ValueError("execution_timeout must be finite and positive")
         self.tool_error_policy = tool_error_policy
+        self.tool_selector = tool_selector
         self.execution_timeout = execution_timeout
         self.name = name
         self.instructions = instructions
@@ -193,21 +195,25 @@ class Agent:
         execution = self._execution(input, **kwargs)
         while True:
             completed: ModelResponse | None = None
-            for raw_event in execution.model.stream(execution.next_request()):
-                event = self._model_stream_event(raw_event)
-                execution.observe_fragment()
-                if event.type == ModelStreamEventType.TEXT_DELTA:
-                    yield AgentStreamEvent(
-                        type=AgentStreamEventType.TEXT_DELTA,
-                        text_delta=event.text_delta or "",
-                    )
-                elif event.type == ModelStreamEventType.TOOL_CALL_DELTA:
-                    yield AgentStreamEvent(
-                        type=AgentStreamEventType.TOOL_CALL_DELTA,
-                        tool_call=event.tool_call,
-                    )
-                elif event.type == ModelStreamEventType.COMPLETED:
-                    completed = event.response
+            request = execution.next_request()
+            with execution.model_call():
+                for raw_event in execution.model.stream(request):
+                    event = self._model_stream_event(raw_event)
+                    execution.observe_fragment()
+                    if event.type == ModelStreamEventType.TEXT_DELTA:
+                        if event.text_delta:
+                            execution.observe_text()
+                        yield AgentStreamEvent(
+                            type=AgentStreamEventType.TEXT_DELTA,
+                            text_delta=event.text_delta or "",
+                        )
+                    elif event.type == ModelStreamEventType.TOOL_CALL_DELTA:
+                        yield AgentStreamEvent(
+                            type=AgentStreamEventType.TOOL_CALL_DELTA,
+                            tool_call=event.tool_call,
+                        )
+                    elif event.type == ModelStreamEventType.COMPLETED:
+                        completed = event.response
             if completed is None:
                 raise RuntimeError("Model stream ended without a completed response")
             step = execution.accept_response(completed)
@@ -252,21 +258,25 @@ class Agent:
     async def _arun_stream_events(self, execution: AgentExecution, astream):
         while True:
             completed: ModelResponse | None = None
-            async for raw_event in astream(execution.next_request()):
-                event = self._model_stream_event(raw_event)
-                execution.observe_fragment()
-                if event.type == ModelStreamEventType.TEXT_DELTA:
-                    yield AgentStreamEvent(
-                        type=AgentStreamEventType.TEXT_DELTA,
-                        text_delta=event.text_delta or "",
-                    )
-                elif event.type == ModelStreamEventType.TOOL_CALL_DELTA:
-                    yield AgentStreamEvent(
-                        type=AgentStreamEventType.TOOL_CALL_DELTA,
-                        tool_call=event.tool_call,
-                    )
-                elif event.type == ModelStreamEventType.COMPLETED:
-                    completed = event.response
+            request = execution.next_request()
+            with execution.model_call():
+                async for raw_event in astream(request):
+                    event = self._model_stream_event(raw_event)
+                    execution.observe_fragment()
+                    if event.type == ModelStreamEventType.TEXT_DELTA:
+                        if event.text_delta:
+                            execution.observe_text()
+                        yield AgentStreamEvent(
+                            type=AgentStreamEventType.TEXT_DELTA,
+                            text_delta=event.text_delta or "",
+                        )
+                    elif event.type == ModelStreamEventType.TOOL_CALL_DELTA:
+                        yield AgentStreamEvent(
+                            type=AgentStreamEventType.TOOL_CALL_DELTA,
+                            tool_call=event.tool_call,
+                        )
+                    elif event.type == ModelStreamEventType.COMPLETED:
+                        completed = event.response
             if completed is None:
                 raise RuntimeError("Model stream ended without a completed response")
             step = execution.accept_response(completed)

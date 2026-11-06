@@ -10,7 +10,7 @@ from modmex import BaseModel
 from modmex_ai.approvals import ApprovalRequest
 from modmex_ai.flows.continuation import FlowContinuation
 from modmex_ai.models import ProviderState, ToolCall
-from modmex_ai.sessions import SessionSnapshot
+from modmex_ai.sessions import SessionSnapshot, SessionItem
 
 
 class FlowStateStatus(str, Enum):
@@ -25,6 +25,7 @@ class FlowSuspension(BaseModel):
 
     approval_request: ApprovalRequest
     pending_tool_call: ToolCall
+    pending_items: list[SessionItem] = field(default_factory=list)
     active_agent_name: str
     provider_state: ProviderState | None = None
     continuation: FlowContinuation | None = None
@@ -61,12 +62,12 @@ class FlowStateStore(ABC):
     """Persists Flow checkpoints with optimistic concurrency and idempotency."""
 
     @abstractmethod
-    def load(self, flow_instance_id: str) -> PersistedFlowState | None:
-        ...
+    def load(self, flow_instance_id: str) -> PersistedFlowState | None: ...
 
     @abstractmethod
-    def save(self, state: PersistedFlowState, *, expected_revision: int) -> PersistedFlowState:
-        ...
+    def save(
+        self, state: PersistedFlowState, *, expected_revision: int
+    ) -> PersistedFlowState: ...
 
 
 class InMemoryFlowStateStore(FlowStateStore):
@@ -76,11 +77,15 @@ class InMemoryFlowStateStore(FlowStateStore):
     def load(self, flow_instance_id: str) -> PersistedFlowState | None:
         return self._states.get(flow_instance_id)
 
-    def save(self, state: PersistedFlowState, *, expected_revision: int) -> PersistedFlowState:
+    def save(
+        self, state: PersistedFlowState, *, expected_revision: int
+    ) -> PersistedFlowState:
         current = self._states.get(state.flow_instance_id)
         revision = current.revision if current else 0
         if revision != expected_revision:
-            raise FlowStateConflictError(f"Flow {state.flow_instance_id!r} revision conflict")
+            raise FlowStateConflictError(
+                f"Flow {state.flow_instance_id!r} revision conflict"
+            )
         stored = PersistedFlowState(**{**state.model_dump(), "revision": revision + 1})
         self._states[state.flow_instance_id] = stored
         return stored

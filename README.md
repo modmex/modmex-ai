@@ -509,3 +509,131 @@ must rebuild/clear incompatible provider state when replacing raw history with a
 otherwise old history can be sent twice. Compaction does not enable automatic persistence,
 age filtering, permissions or TMS-specific retention rules. Existing SessionSnapshot.compact
 remains a separate legacy item-trimming utility and is not automatically replaced.
+
+
+## Responses state contract and audit corrections
+
+Choose one state strategy, and persist the returned ProviderState with your host's
+conversation revision (optimistic concurrency is still the host's responsibility):
+
+```python
+from modmex_ai import ProviderState, ModelSettings, OpenAISettings
+
+# Explicit manual history; returned response IDs do not switch this run into chaining.
+manual = ProviderState(provider="openai", mode="stateless")
+# Start a response chain, or resume it with previous_response_id="resp_...".
+chain = ProviderState(provider="openai", mode="response_chain")
+# Use an existing OpenAI conversation; never add previous_response_id here.
+conversation = ProviderState(provider="openai", mode="conversation", conversation_id="conv_...")
+```
+
+Legacy single-ID states infer their mode. States containing both IDs now fail before
+request execution, including previously persisted invalid states: migrate them by choosing
+one strategy and clearing the other identifier. Responses containing both a response ID
+and conversation ID yield a conversation-mode state with only conversation_id. When no
+explicit mode is given, OpenAI response IDs retain the previous automatic chaining behavior.
+A chain requires the adapter to return continuation state; missing state is rejected.
+
+With remote state, provide ONLY the new turn as Agent input. The runner tracks pending
+items per inference; it does not guess newness by filtering function_call_output. Tool
+outputs from earlier iterations are not resent. Instructions and guardrail corrections
+are reissued, while rejected assistant responses already in the remote chain are not
+appended again. Failed transport retries reuse the same pending request; the cursor only
+advances after receiving a response. This is not an exactly-once provider request guarantee:
+a timeout can leave remote state ambiguous and requires host-side reconciliation.
+
+Flow may mirror remote conversations in a local Session for auditing, but it never sends
+that local history alongside the remote state. Passing full history directly to Agent
+with a remote identifier still duplicates it: the caller owns the first-turn input contract.
+Remote handoffs send only their pending acknowledgement plus the destination instructions.
+Local handoff history filters are incompatible with retained server history and are rejected;
+use stateless execution if a filter must actually remove context. Compaction likewise
+requires resetting/rebuilding incompatible remote state before using summarized history.
+
+Mixed handoff/tool batches (and multiple handoffs) are rejected before any callback or tool
+runs. Approval-required calls must be the sole call in their batch. This explicit policy
+avoids partial side effects and ambiguous parallel approval checkpoints. Flow approvals,
+including streamed runs, retain the latest remote response ID and can be serialized and
+resumed with only the pending output. Hosts still must persist approval/execution receipts
+and prevent double resume; modmex-ai does not guarantee exactly-once external writes.
+
+### Tool availability and concurrency
+
+Agent(tool_selector=...) optionally accepts a synchronous callback `(run_context, names)`
+returning available tool/handoff names before each inference. Only registered names are
+accepted, original schema order stays stable, and calls to unavailable tools are rejected
+before execution. No selector means all registered tools remain available. Availability
+is also checked before an approved tool is resumed; backend authorization remains mandatory.
+Use conservative selection, since changing the schema prefix can reduce cache reuse.
+Tool schemas are built once per execution, not fetched/rebuilt on every inference.
+
+`Agent.parallel_tool_calls` controls local async concurrency (default False).
+`ModelSettings.parallel_tool_calls` independently controls whether OpenAI may propose
+parallel calls (omitted by default). Neither flag proves tool independence; only enable
+local parallelism when the host knows those operations can safely overlap.
+
+### Cache controls and measurements
+
+```python
+settings = ModelSettings(
+    parallel_tool_calls=False,
+    openai=OpenAISettings(
+        prompt_cache_key="workspace-profile-prompt-v1",
+        prompt_cache_retention="in_memory",  # or "24h" on compatible models
+    ),
+)
+```
+
+Cache options map explicitly to Responses and Chat Completions and are omitted by default.
+They group cache routing; they do not guarantee cache hits, lower billing, or lower latency.
+Hosts choose stable non-sensitive keys and stable instruction/tool prefixes, with tenant
+isolation as appropriate. Existing Usage.cached_input_tokens measures actual cached usage.
+In streamed runs, model_first_fragment measures the first normalized model stream event and model_first_token
+measures the first nonempty text delta separately. Buffered/streamed provider errors are
+traced without internal error text. Request sizes describe the input actually sent by the
+runner, not the full local mirrored history.
+
+Contract references: https://developers.openai.com/api/docs/guides/conversation-state
+and https://developers.openai.com/api/docs/guides/prompt-caching.
+The compatibility tests exercise the real OpenAI adapter with simulated HTTP/SSE transports;
+they do not call live OpenAI or establish production latency improvements.
+
+
+## Native OpenAI server-side compaction (Responses only)
+
+```python
+settings = ModelSettings(openai=OpenAISettings(compact_threshold=12_000))
+state = ProviderState(provider="openai", mode="response_chain")
+agent = Agent(name="carrier", instructions=instructions, tools=tools,
+              model=responses_model, settings=settings)
+result = await agent.run_async(new_input, provider_state=state)
+# responses_model must support native compaction.
+# Persist result.provider_state; next time pass only the new input with that state.
+```
+
+`compact_threshold` is a positive token count, not serialized bytes. It is omitted by
+default. Responses sends `context_management=[{"type":"compaction","compact_threshold":N}]`.
+OpenAI decides when the rendered context crosses the configured threshold. Model support
+and permitted thresholds are validated by the provider; the library does not assume every
+model supports the feature. Choose a threshold with room below the model's context limit.
+
+This integration intentionally requires response_chain mode, including for the first call
+without a previous_response_id. Chat Completions, stateless/manual history and conversation
+mode are rejected when native compaction is enabled. This restriction prevents silently
+losing opaque compaction output with the current generic history types. For manual history,
+use ContextCompactor instead. Do not combine local summary replacement with a retained
+remote chain, and do not prune the server-managed history yourself.
+
+When a completed response contains compaction output items, ModelResponse.compaction_count
+reports their count and Agent emits provider_compaction with count, request ID and response
+usage. It does not log or interpret encrypted_content. The existing raw provider response
+retains opaque items for low-level callers; application logging of raw responses remains
+its responsibility. Counts reflect items the provider reports, not an inferred trigger or
+compaction on every turn. Usage is provider-reported for the response; separate compaction
+cost/duration is not invented when the provider does not expose it. In-stream compaction
+is reported when the completed response is processed.
+
+Continuation keeps previous_response_id, tool outputs and subsequent user input; it does
+not resend the opaque item or the old raw history. Local conversation records remain
+independent for UI/audit purposes. No separate /responses/compact endpoint is invoked.
+See https://developers.openai.com/api/docs/guides/compaction.
