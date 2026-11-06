@@ -386,3 +386,126 @@ parallel calls that depend on each other's results or mutate the same state.
 Streaming progress and finish events arrive as tools produce them; results sent
 back to the model retain the original call order. A failed or cancelled batch
 cancels and awaits its remaining tasks. Synchronous runs remain sequential.
+
+
+## Execution resilience and latency (0.5)
+
+Existing agents retain fail-fast tool handling unless explicitly configured:
+
+```python
+from modmex_ai import Agent, ModelSettings, RunTimeoutError, execution_budget
+
+agent = Agent(
+    name="driver",
+    instructions="Use tools to perform operations; never claim unconfirmed writes succeeded.",
+    model=model,
+    tools=tools,
+    tool_error_policy="return_error",
+    execution_timeout=25,
+    settings=ModelSettings(reasoning_effort="low", max_tokens=500),
+)
+try:
+    result = await agent.run_async("Report arrival")
+except RunTimeoutError:
+    # The application persists pending work and sends its own deterministic fallback.
+    # A timed-out write may already have completed: verify before retrying.
+    ...
+```
+
+`return_error` converts ToolExecutionError/ToolValidationError into sanitized function
+outputs with `ok: false`, an error code, and `retryable: false`. The model can then
+respond without exposing internal exception text. There are no automatic tool retries.
+Approvals, remote MCP requests for human input, guardrail blocks, cancellation, unknown tools and execution deadlines still
+propagate. With recovery enabled, remote MCP tools use their buffered call path even
+in agent streaming; model streaming remains available, but MCP progress is not emitted.
+
+Execution deadlines are optional and shared with nested agents and HTTP retries.
+Wrap a whole Flow in `with execution_budget(seconds):` to share a single deadline across
+handoffs. Async execution cancels cooperative operations when the budget expires.
+Synchronous execution checks deadlines between operations and bounds HTTP timeouts;
+it cannot forcibly interrupt arbitrary blocking Python functions or undo writes.
+The same limitation applies to blocking synchronous functions called inside async code
+and synchronous model fallbacks running in worker threads. Closing a stream early
+is still the caller's responsibility. Do not hold a stream open while running unrelated
+work in the same task: its execution budget remains active until it is closed.
+
+Trace events include model response duration, first streamed event latency, message
+count, UTF-8 context/schema sizes, and tool duration/outcome. Byte counts are not token
+estimates. New metrics do not include prompt text, arguments or exception messages;
+existing application tracing policies still apply. Non-streaming model failures produce
+`model_error` with exception type and elapsed time. Attach existing Trace observers to
+export these metrics; supply RetryConfig(on_retry=...) for sanitized retry events.
+
+HTTP retries honor Retry-After (seconds or HTTP date), skip exhausted billing quota,
+respect the active execution budget and support optional jitter_seconds. An explicitly
+empty status_codes set disables retries. Streams are never replayed after output starts.
+Transport/network timeouts retain their existing fail-fast policy. No HTTP connection
+pooling was replaced: AsyncHttpClient already owns/reuses its transport explicitly.
+
+`reasoning_effort` is omitted by default and maps to Responses `reasoning.effort` or
+Chat Completions `reasoning_effort`. Model support and accepted effort levels vary;
+choose compatible settings explicitly. The library validates known effort names but
+does not maintain a model capability catalog or silently remove sampling parameters.
+See https://developers.openai.com/api/docs/guides/reasoning.
+
+These mechanisms do not send user messages, escalate business cases, change an agent's
+permissions, or compact business context automatically. Those remain application policies.
+
+
+## Incremental context compaction
+
+Compaction is opt-in and provider-neutral. It is independent of Agent/Flow execution,
+so hosts can compact the exact business context they assemble, without changing agents.
+
+```python
+from modmex_ai import ContextCompactor, CompactionSnapshot, execution_budget
+
+compactor = ContextCompactor(
+    model=summary_model,  # Host chooses the model and credentials.
+    threshold=24_000,     # Serialized UTF-8 bytes by default, not tokens.
+    keep_recent_turns=4,
+    max_input_size=32_000,
+    max_summary_bytes=6_000,
+    preservation_instructions="Preserve load IDs, assignments and unresolved requests.",
+)
+with execution_budget(25):  # Shared budget for compaction AND the ensuing agent run.
+    result = await compactor.compact_async(full_history, previous=saved_snapshot, trace=trace)
+    # Persist result.snapshot using your repository and optimistic concurrency control.
+    # Supply result.messages as agent input; do not add the previous summary again.
+    # If still over your allowed budget, apply an explicit host policy before executing.
+    response = await agent.run_async(result.messages)
+```
+
+Pass the full, append-only history every time, together with the last successful
+CompactionSnapshot (serializable with model_dump()). The snapshot stores summary,
+covered item count and a digest of the covered prefix. Changed/truncated history or a
+snapshot from another history is rejected; the host must reset/rebuild it explicitly.
+Already covered messages are replaced by the existing summary before checking the
+threshold, and only new complete turns enter the next incremental summary request.
+Persist the snapshot only for the matching history revision; concurrent turns require
+host-side synchronization. The original history is never mutated or deleted.
+
+System/developer messages are preserved verbatim, including those inside the covered
+prefix. Summaries are injected as user-role historical data, never elevated to privileged
+instructions. Recent user turns are kept verbatim; pending calls and parallel tool-call
+blocks are never split. Supply tool history as SessionItem function_call/output (or
+handoff_call/output) pairs with unique call IDs. Orphan/duplicate outputs are rejected;
+legacy Message(role="tool") records require explicit conversion by the host.
+
+A single bounded batch is compacted per call. Large turns are not truncated to fit the
+summarizer. Results report unchanged, compacted, blocked or failed, sizes, duration,
+usage and a safe reason. A compacted result can still exceed the threshold: the host
+must check after_size and choose whether to compact again, defer or reject execution.
+Supply a deterministic, monotonic measure=your_token_counter and thresholds in matching units for token budgets;
+max_summary_bytes remains a byte cap. Empty, oversized, or non-reducing summaries never
+replace the old snapshot. Provider failures retain the previous effective context and
+unsummarized messages; cancellation and RunTimeoutError propagate. Usage from completed
+summarizer responses is reported even if the summary is rejected. Failed provider calls
+may incur usage unavailable to the library. Summarization is lossy: critical authorization
+and transaction state must always be reloaded from authoritative application data.
+
+The compactor does not change provider_state or server-managed conversations. Hosts
+must rebuild/clear incompatible provider state when replacing raw history with a summary;
+otherwise old history can be sent twice. Compaction does not enable automatic persistence,
+age filtering, permissions or TMS-specific retention rules. Existing SessionSnapshot.compact
+remains a separate legacy item-trimming utility and is not automatically replaced.

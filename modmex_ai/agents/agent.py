@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
+from modmex_ai.budget import execution_budget, bounded_await
 from contextlib import aclosing
 from typing import Any
 
@@ -9,7 +11,11 @@ from modmex_ai.agents.context import RunContext
 from modmex_ai.agents.execution import AgentExecution
 from modmex_ai.agents.handoff import Handoff, normalize_handoffs
 from modmex_ai.agents.result import AgentResult
-from modmex_ai.agents.stream import AgentStreamEvent, AgentStreamEventType, MCPProgressEvent
+from modmex_ai.agents.stream import (
+    AgentStreamEvent,
+    AgentStreamEventType,
+    MCPProgressEvent,
+)
 from modmex_ai.errors import OutputGuardrailTriggered, OutputValidationError
 from modmex_ai.guardrails import (
     InputGuardrail,
@@ -54,10 +60,20 @@ class Agent:
         settings: ModelSettings | None = None,
         max_tool_calls: int = 8,
         parallel_tool_calls: bool = False,
+        tool_error_policy: str = "raise",
+        execution_timeout: float | None = None,
         input_guardrails: list[InputGuardrail] | None = None,
         output_guardrails: list[OutputGuardrail] | None = None,
         max_output_guardrail_retries: int = 0,
     ) -> None:
+        if tool_error_policy not in {"raise", "return_error"}:
+            raise ValueError("Invalid tool_error_policy")
+        if execution_timeout is not None and (
+            not math.isfinite(execution_timeout) or execution_timeout <= 0
+        ):
+            raise ValueError("execution_timeout must be finite and positive")
+        self.tool_error_policy = tool_error_policy
+        self.execution_timeout = execution_timeout
         self.name = name
         self.instructions = instructions
         self.output_type = output_type
@@ -96,71 +112,129 @@ class Agent:
         approval_reason: str | None = None,
     ):
         def decorator(inner):
-            return self.add_tool(create_tool(
-                inner,
-                name=name,
-                description=description,
-                input_guardrails=input_guardrails,
-                output_guardrails=output_guardrails,
-                requires_approval=requires_approval,
-                approval_reason=approval_reason,
-            ))
+            return self.add_tool(
+                create_tool(
+                    inner,
+                    name=name,
+                    description=description,
+                    input_guardrails=input_guardrails,
+                    output_guardrails=output_guardrails,
+                    requires_approval=requires_approval,
+                    approval_reason=approval_reason,
+                )
+            )
+
         return decorator if func is None else decorator(func)
 
-    def as_tool(self, *, tool_name: str | None = None, tool_description: str | None = None) -> Tool:
+    def as_tool(
+        self, *, tool_name: str | None = None, tool_description: str | None = None
+    ) -> Tool:
         def run_agent(input: str, ctx=None) -> Any:
             result = self.run(input, context=ctx)
             if isinstance(ctx, RunContext):
                 nested_usage = ctx.state.setdefault(_NESTED_USAGE_STATE_KEY, Usage())
                 nested_usage.add(result.usage)
             return result.output
-        return create_tool(run_agent, name=tool_name or self.name, description=tool_description or self.instructions)
+
+        return create_tool(
+            run_agent,
+            name=tool_name or self.name,
+            description=tool_description or self.instructions,
+        )
 
     def run(self, input: Any, **kwargs: Any) -> AgentResult:
+        with execution_budget(self.execution_timeout):
+            return self._run(input, **kwargs)
+
+    async def run_async(self, input: Any, **kwargs: Any) -> AgentResult:
+        with execution_budget(self.execution_timeout):
+            return await bounded_await(self._run_async(input, **kwargs))
+
+    def run_stream(self, input: Any, **kwargs: Any):
+        with execution_budget(self.execution_timeout):
+            yield from self._run_stream(input, **kwargs)
+
+    async def arun_stream(self, input: Any, **kwargs: Any):
+        with execution_budget(self.execution_timeout):
+            async with aclosing(self._arun_stream(input, **kwargs)) as events:
+                while True:
+                    try:
+                        event = await bounded_await(anext(events))
+                    except StopAsyncIteration:
+                        return
+                    yield event
+
+    def _run(self, input: Any, **kwargs: Any) -> AgentResult:
         self._ensure_mcp_clients_connected()
         return self._run_execution(self._execution(input, **kwargs))
 
-    async def run_async(self, input: Any, **kwargs: Any) -> AgentResult:
+    async def _run_async(self, input: Any, **kwargs: Any) -> AgentResult:
         await self._prepare_mcp_clients()
         execution = self._execution(input, **kwargs)
         acomplete = getattr(execution.model, "acomplete", None)
         while True:
             request = execution.next_request()
-            response = (await acomplete(request) if callable(acomplete)
-                        else await asyncio.to_thread(execution.model.complete, request))
+            with execution.model_call():
+                response = (
+                    await acomplete(request)
+                    if callable(acomplete)
+                    else await asyncio.to_thread(execution.model.complete, request)
+                )
             step = execution.accept_response(response)
             if step.result is not None:
                 return step.result
-            async for _ in self._execute_tool_events(execution, step.tool_calls or [], streaming=False):
+            async for _ in self._execute_tool_events(
+                execution, step.tool_calls or [], streaming=False
+            ):
                 pass
 
-    def run_stream(self, input: Any, **kwargs: Any):
+    def _run_stream(self, input: Any, **kwargs: Any):
         self._ensure_mcp_clients_connected()
         execution = self._execution(input, **kwargs)
         while True:
             completed: ModelResponse | None = None
             for raw_event in execution.model.stream(execution.next_request()):
                 event = self._model_stream_event(raw_event)
+                execution.observe_fragment()
                 if event.type == ModelStreamEventType.TEXT_DELTA:
-                    yield AgentStreamEvent(type=AgentStreamEventType.TEXT_DELTA, text_delta=event.text_delta or "")
+                    yield AgentStreamEvent(
+                        type=AgentStreamEventType.TEXT_DELTA,
+                        text_delta=event.text_delta or "",
+                    )
                 elif event.type == ModelStreamEventType.TOOL_CALL_DELTA:
-                    yield AgentStreamEvent(type=AgentStreamEventType.TOOL_CALL_DELTA, tool_call=event.tool_call)
+                    yield AgentStreamEvent(
+                        type=AgentStreamEventType.TOOL_CALL_DELTA,
+                        tool_call=event.tool_call,
+                    )
                 elif event.type == ModelStreamEventType.COMPLETED:
                     completed = event.response
             if completed is None:
                 raise RuntimeError("Model stream ended without a completed response")
             step = execution.accept_response(completed)
             if step.result is not None:
-                yield AgentStreamEvent(type=AgentStreamEventType.HANDOFF if step.result.handoff_target else AgentStreamEventType.COMPLETED, result=step.result)
+                yield AgentStreamEvent(
+                    type=AgentStreamEventType.HANDOFF
+                    if step.result.handoff_target
+                    else AgentStreamEventType.COMPLETED,
+                    result=step.result,
+                )
                 return
             for tool_call in step.tool_calls or []:
                 execution.begin_tool_call(tool_call)
-                yield AgentStreamEvent(type=AgentStreamEventType.TOOL_CALL_DELTA, tool_call=tool_call)
-                tool_result = execution.executor.execute(tool_call, context=execution.context)
+                yield AgentStreamEvent(
+                    type=AgentStreamEventType.TOOL_CALL_DELTA, tool_call=tool_call
+                )
+                tool_result = execution.executor.execute(
+                    tool_call, context=execution.context
+                )
                 execution.accept_tool_result(tool_result)
-                yield AgentStreamEvent(type=AgentStreamEventType.TOOL_FINISHED, tool_call=tool_call, data={"output": tool_result.output})
+                yield AgentStreamEvent(
+                    type=AgentStreamEventType.TOOL_FINISHED,
+                    tool_call=tool_call,
+                    data={"output": tool_result.output},
+                )
 
-    async def arun_stream(self, input: Any, **kwargs: Any):
+    async def _arun_stream(self, input: Any, **kwargs: Any):
         """Async counterpart of ``run_stream`` for models with native streaming."""
         await self._prepare_mcp_clients()
         execution = self._execution(input, **kwargs)
@@ -180,26 +254,48 @@ class Agent:
             completed: ModelResponse | None = None
             async for raw_event in astream(execution.next_request()):
                 event = self._model_stream_event(raw_event)
+                execution.observe_fragment()
                 if event.type == ModelStreamEventType.TEXT_DELTA:
-                    yield AgentStreamEvent(type=AgentStreamEventType.TEXT_DELTA, text_delta=event.text_delta or "")
+                    yield AgentStreamEvent(
+                        type=AgentStreamEventType.TEXT_DELTA,
+                        text_delta=event.text_delta or "",
+                    )
                 elif event.type == ModelStreamEventType.TOOL_CALL_DELTA:
-                    yield AgentStreamEvent(type=AgentStreamEventType.TOOL_CALL_DELTA, tool_call=event.tool_call)
+                    yield AgentStreamEvent(
+                        type=AgentStreamEventType.TOOL_CALL_DELTA,
+                        tool_call=event.tool_call,
+                    )
                 elif event.type == ModelStreamEventType.COMPLETED:
                     completed = event.response
             if completed is None:
                 raise RuntimeError("Model stream ended without a completed response")
             step = execution.accept_response(completed)
             if step.result is not None:
-                yield AgentStreamEvent(type=AgentStreamEventType.HANDOFF if step.result.handoff_target else AgentStreamEventType.COMPLETED, result=step.result)
+                yield AgentStreamEvent(
+                    type=AgentStreamEventType.HANDOFF
+                    if step.result.handoff_target
+                    else AgentStreamEventType.COMPLETED,
+                    result=step.result,
+                )
                 return
-            async with aclosing(self._execute_tool_events(execution, step.tool_calls or [], streaming=True)) as events:
+            async with aclosing(
+                self._execute_tool_events(
+                    execution, step.tool_calls or [], streaming=True
+                )
+            ) as events:
                 async for event in events:
                     yield event
 
     async def _tool_events(self, execution, tool_call, *, streaming):
-        yield AgentStreamEvent(type=AgentStreamEventType.TOOL_CALL_DELTA, tool_call=tool_call)
+        yield AgentStreamEvent(
+            type=AgentStreamEventType.TOOL_CALL_DELTA, tool_call=tool_call
+        )
         tool = execution.executor.tools.get(tool_call.name)
-        if streaming and isinstance(tool, RemoteTool):
+        if (
+            streaming
+            and isinstance(tool, RemoteTool)
+            and self.tool_error_policy == "raise"
+        ):
             stream = tool.stream(tool_call.arguments)
             tool_output = None
             try:
@@ -217,10 +313,20 @@ class Agent:
                 await stream.aclose()
             if tool_output is None:
                 raise asyncio.CancelledError
-            tool_result = ToolResult(tool_call_id=tool_call.tool_call_id, name=tool_call.name, output=tool_output)
+            tool_result = ToolResult(
+                tool_call_id=tool_call.tool_call_id,
+                name=tool_call.name,
+                output=tool_output,
+            )
         else:
-            tool_result = await execution.executor.execute_async(tool_call, context=execution.context)
-        yield AgentStreamEvent(type=AgentStreamEventType.TOOL_FINISHED, tool_call=tool_call, data={"output": tool_result.output})
+            tool_result = await execution.executor.execute_async(
+                tool_call, context=execution.context
+            )
+        yield AgentStreamEvent(
+            type=AgentStreamEventType.TOOL_FINISHED,
+            tool_call=tool_call,
+            data={"output": tool_result.output},
+        )
 
     async def _execute_tool_events(self, execution, calls, *, streaming):
         results = {}
@@ -236,7 +342,9 @@ class Agent:
         if not self.parallel_tool_calls:
             for call in calls:
                 execution.begin_tool_call(call)
-                async for event in self._tool_events(execution, call, streaming=streaming):
+                async for event in self._tool_events(
+                    execution, call, streaming=streaming
+                ):
                     accept(event)
                     yield event
                 execution.accept_tool_result(results[call.tool_call_id])
@@ -246,7 +354,9 @@ class Agent:
 
         async def worker(call):
             try:
-                async for event in self._tool_events(execution, call, streaming=streaming):
+                async for event in self._tool_events(
+                    execution, call, streaming=streaming
+                ):
                     await queue.put(event)
             except BaseException as error:
                 await queue.put(error)
@@ -277,15 +387,24 @@ class Agent:
 
     def _run_execution(self, execution: AgentExecution) -> AgentResult:
         while True:
-            step = execution.accept_response(execution.model.complete(execution.next_request()))
+            request = execution.next_request()
+            with execution.model_call():
+                response = execution.model.complete(request)
+            step = execution.accept_response(response)
             if step.result is not None:
                 return step.result
             for tool_call in step.tool_calls or []:
                 execution.begin_tool_call(tool_call)
-                execution.accept_tool_result(execution.executor.execute(tool_call, context=execution.context))
+                execution.accept_tool_result(
+                    execution.executor.execute(tool_call, context=execution.context)
+                )
 
     async def _prepare_mcp_clients(self) -> None:
-        tasks = [asyncio.create_task(client.connect()) for client in self.mcp_clients if not client.connected]
+        tasks = [
+            asyncio.create_task(client.connect())
+            for client in self.mcp_clients
+            if not client.connected
+        ]
         try:
             await asyncio.gather(*tasks)
         finally:
@@ -298,7 +417,9 @@ class Agent:
                 if remote_tool.name in attached:
                     continue
                 if any(tool.name == remote_tool.name for tool in self.tools):
-                    raise ValueError(f"Duplicate tool name from MCP client: {remote_tool.name}")
+                    raise ValueError(
+                        f"Duplicate tool name from MCP client: {remote_tool.name}"
+                    )
                 self.tools.append(remote_tool)
                 attached.add(remote_tool.name)
 
@@ -314,7 +435,9 @@ class Agent:
                 if remote_tool.name in attached:
                     continue
                 if any(tool.name == remote_tool.name for tool in self.tools):
-                    raise ValueError(f"Duplicate tool name from MCP client: {remote_tool.name}")
+                    raise ValueError(
+                        f"Duplicate tool name from MCP client: {remote_tool.name}"
+                    )
                 self.tools.append(remote_tool)
                 attached.add(remote_tool.name)
 
@@ -331,13 +454,26 @@ class Agent:
         active_model = model or self.model
         if active_model is None:
             raise ValueError(f"Agent {self.name!r} has no model")
-        run_context = context if isinstance(context, RunContext) else RunContext(input=input, context=context)
+        run_context = (
+            context
+            if isinstance(context, RunContext)
+            else RunContext(input=input, context=context)
+        )
         if run_input_guardrails:
             enforce_input_guardrails(input, self.input_guardrails, context=run_context)
-        return AgentExecution(agent=self, model=active_model, input=input, context=run_context, provider_state=provider_state, run_output_guardrails=run_output_guardrails)
+        return AgentExecution(
+            agent=self,
+            model=active_model,
+            input=input,
+            context=run_context,
+            provider_state=provider_state,
+            run_output_guardrails=run_output_guardrails,
+        )
 
     @staticmethod
-    def _model_stream_event(value: ModelStreamEvent | ModelResponse) -> ModelStreamEvent:
+    def _model_stream_event(
+        value: ModelStreamEvent | ModelResponse,
+    ) -> ModelStreamEvent:
         if isinstance(value, ModelResponse):
             return ModelStreamEvent.completed(value)
         if isinstance(value, ModelStreamEvent):
@@ -347,30 +483,70 @@ class Agent:
     def _output_schema(self) -> dict[str, Any] | None:
         return schema_for_model(self.output_type) if self.output_type else None
 
-    def _should_retry_output(self, *, output: Any, response_text: str | None, messages: list[Message | SessionItem], context: RunContext, retry_count: int) -> bool:
+    def _should_retry_output(
+        self,
+        *,
+        output: Any,
+        response_text: str | None,
+        messages: list[Message | SessionItem],
+        context: RunContext,
+        retry_count: int,
+    ) -> bool:
         try:
             enforce_output_guardrails(output, self.output_guardrails, context=context)
         except OutputGuardrailTriggered as error:
             if retry_count >= self.max_output_guardrail_retries:
                 raise
-            context.trace.add("guardrail", f"{self.name}_output_retry", attempt=retry_count + 1, reason=str(error))
-            messages.extend([
-                Message(role="assistant", content=response_text or ""),
-                Message(role="developer", content="The previous candidate output was rejected by an output guardrail: " f"{error}. Produce a corrected replacement that fully satisfies the output schema and the guardrail rule."),
-            ])
+            context.trace.add(
+                "guardrail",
+                f"{self.name}_output_retry",
+                attempt=retry_count + 1,
+                reason=str(error),
+            )
+            messages.extend(
+                [
+                    Message(role="assistant", content=response_text or ""),
+                    Message(
+                        role="developer",
+                        content="The previous candidate output was rejected by an output guardrail: "
+                        f"{error}. Produce a corrected replacement that fully satisfies the output schema and the guardrail rule.",
+                    ),
+                ]
+            )
             return True
         return False
 
-    def _initial_messages(self, input: Any, *, include_output_schema_prompt: bool = True) -> list[Message | SessionItem]:
+    def _initial_messages(
+        self, input: Any, *, include_output_schema_prompt: bool = True
+    ) -> list[Message | SessionItem]:
         instructions = self.instructions
         if self.output_type and include_output_schema_prompt:
-            instructions += "\n\nReturn only JSON that matches this schema:\n" + json.dumps(schema_for_model(self.output_type), separators=(",", ":"))
-        return [Message(role="system", content=instructions), *self._input_messages(input)]
+            instructions += (
+                "\n\nReturn only JSON that matches this schema:\n"
+                + json.dumps(schema_for_model(self.output_type), separators=(",", ":"))
+            )
+        return [
+            Message(role="system", content=instructions),
+            *self._input_messages(input),
+        ]
 
     def _input_messages(self, input: Any) -> list[Message | SessionItem]:
-        if isinstance(input, list) and all(isinstance(item, (Message, SessionItem, dict)) for item in input):
-            return [item if isinstance(item, (Message, SessionItem)) else SessionItem(**item) if item.get("type") else Message(**item) for item in input]
-        return [Message(role="user", content=input if isinstance(input, str) else dumps(input))]
+        if isinstance(input, list) and all(
+            isinstance(item, (Message, SessionItem, dict)) for item in input
+        ):
+            return [
+                item
+                if isinstance(item, (Message, SessionItem))
+                else SessionItem(**item)
+                if item.get("type")
+                else Message(**item)
+                for item in input
+            ]
+        return [
+            Message(
+                role="user", content=input if isinstance(input, str) else dumps(input)
+            )
+        ]
 
     def _parse_output(self, text: str | None) -> Any:
         if self.output_type is None:

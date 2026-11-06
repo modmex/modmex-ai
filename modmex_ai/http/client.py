@@ -12,6 +12,7 @@ from modmex import BaseModel
 
 from modmex_ai.errors import ModelTimeoutError, ProviderError, RateLimitError
 from modmex_ai.http.retries import RetryConfig
+from modmex_ai.budget import bounded_timeout, remaining_seconds
 
 
 class HttpResponse(BaseModel):
@@ -30,7 +31,9 @@ class HttpFile:
 
 
 class HttpClient:
-    def __init__(self, *, retry: RetryConfig | None = None, timeout: float = 30.0) -> None:
+    def __init__(
+        self, *, retry: RetryConfig | None = None, timeout: float = 30.0
+    ) -> None:
         self.retry = retry or RetryConfig()
         self.timeout = timeout
 
@@ -55,12 +58,19 @@ class HttpClient:
         last_error: Exception | None = None
         for attempt in range(self.retry.attempts + 1):
             try:
-                return self._send(request, timeout=timeout or self.timeout)
+                return self._send(
+                    request,
+                    timeout=bounded_timeout(
+                        timeout if timeout is not None else self.timeout
+                    ),
+                )
             except ProviderError as exc:
                 last_error = exc
-                if exc.status_code not in self.retry.status_codes or attempt >= self.retry.attempts:
+                delay = self.retry.delay(exc, attempt)
+                if delay is None:
                     raise
-                time.sleep(self.retry.backoff_seconds * (2**attempt))
+                time.sleep(delay)
+                remaining_seconds()
         assert last_error is not None
         raise last_error
 
@@ -79,7 +89,11 @@ class HttpClient:
             headers={"content-type": "application/json", **(headers or {})},
             method="POST",
         )
-        return self._send(request, timeout=timeout or self.timeout, decode_json=False)
+        return self._send(
+            request,
+            timeout=bounded_timeout(timeout if timeout is not None else self.timeout),
+            decode_json=False,
+        )
 
     def post_json_stream(
         self,
@@ -98,7 +112,11 @@ class HttpClient:
             headers={"content-type": "application/json", **(headers or {})},
             method="POST",
         )
-        return self._stream(request, timeout=timeout or self.timeout, chunk_size=chunk_size)
+        return self._stream(
+            request,
+            timeout=bounded_timeout(timeout if timeout is not None else self.timeout),
+            chunk_size=chunk_size,
+        )
 
     def post_multipart(
         self,
@@ -120,7 +138,10 @@ class HttpClient:
             },
             method="POST",
         )
-        return self._send(request, timeout=timeout or self.timeout)
+        return self._send(
+            request,
+            timeout=bounded_timeout(timeout if timeout is not None else self.timeout),
+        )
 
     def _send(
         self,
@@ -130,7 +151,9 @@ class HttpClient:
         decode_json: bool = True,
     ) -> HttpResponse:
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with urllib.request.urlopen(
+                request, timeout=bounded_timeout(timeout)
+            ) as response:
                 headers = dict(response.headers.items())
                 raw_body = response.read()
                 return HttpResponse(
@@ -169,10 +192,14 @@ class HttpClient:
         chunk_size: int,
     ) -> Iterator[bytes]:
         last_error: ProviderError | None = None
+        emitted = False
         for attempt in range(self.retry.attempts + 1):
             try:
-                with urllib.request.urlopen(request, timeout=timeout) as response:
+                with urllib.request.urlopen(
+                    request, timeout=bounded_timeout(timeout)
+                ) as response:
                     while chunk := response.read(chunk_size):
+                        emitted = True
                         yield chunk
                 return
             except TimeoutError as exc:
@@ -181,9 +208,11 @@ class HttpClient:
                 last_error = _provider_error_from_http_error(exc)
             except urllib.error.URLError as exc:
                 last_error = ProviderError(str(exc))
-            if last_error.status_code not in self.retry.status_codes or attempt >= self.retry.attempts:
+            delay = None if emitted else self.retry.delay(last_error, attempt)
+            if delay is None:
                 raise last_error
-            time.sleep(self.retry.backoff_seconds * (2**attempt))
+            time.sleep(delay)
+            remaining_seconds()
         assert last_error is not None
         raise last_error
 
@@ -195,23 +224,27 @@ def _multipart_body(
 ) -> bytes:
     chunks: list[bytes] = []
     for name, value in fields.items():
-        chunks.extend([
-            f"--{boundary}\r\n".encode(),
-            f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode(),
-            value.encode("utf-8"),
-            b"\r\n",
-        ])
+        chunks.extend(
+            [
+                f"--{boundary}\r\n".encode(),
+                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode(),
+                value.encode("utf-8"),
+                b"\r\n",
+            ]
+        )
     for name, file in files.items():
-        chunks.extend([
-            f"--{boundary}\r\n".encode(),
-            (
-                f'Content-Disposition: form-data; name="{name}"; '
-                f'filename="{file.filename}"\r\n'
-            ).encode(),
-            f"Content-Type: {file.content_type}\r\n\r\n".encode(),
-            file.data,
-            b"\r\n",
-        ])
+        chunks.extend(
+            [
+                f"--{boundary}\r\n".encode(),
+                (
+                    f'Content-Disposition: form-data; name="{name}"; '
+                    f'filename="{file.filename}"\r\n'
+                ).encode(),
+                f"Content-Type: {file.content_type}\r\n\r\n".encode(),
+                file.data,
+                b"\r\n",
+            ]
+        )
     chunks.append(f"--{boundary}--\r\n".encode())
     return b"".join(chunks)
 

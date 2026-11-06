@@ -137,6 +137,7 @@ def test_openai_realtime_executes_function_call_and_continues_response():
         ]
         assert [step.type for step in session.context.trace.steps] == [
             "realtime_server_event",
+            "tool_execution",
             "realtime_tool_call",
             "realtime_client_event",
             "realtime_client_event",

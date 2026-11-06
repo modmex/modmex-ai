@@ -9,15 +9,32 @@ from typing import Any, Callable, Union, get_args, get_origin, get_type_hints
 
 from modmex import BaseModel
 
-from modmex_ai.approvals import ApprovalDecision, ApprovalDecisionType, ApprovalPolicy, ApprovalRequest
-from modmex_ai.errors import ApprovalRejected, ApprovalRequired, GuardrailTriggered, ToolExecutionError, ToolValidationError
+from modmex_ai.approvals import (
+    ApprovalDecision,
+    ApprovalDecisionType,
+    ApprovalPolicy,
+    ApprovalRequest,
+)
+from modmex_ai.errors import (
+    ApprovalRejected,
+    ApprovalRequired,
+    GuardrailTriggered,
+    ToolExecutionError,
+    ToolValidationError,
+    RunTimeoutError,
+)
 from modmex_ai.guardrails import (
     ToolInputGuardrail,
     ToolOutputGuardrail,
     enforce_tool_input_guardrails,
     enforce_tool_output_guardrails,
 )
-from modmex_ai.schemas import dumps, function_schema, schema_for_type, validate_tool_args
+from modmex_ai.schemas import (
+    dumps,
+    function_schema,
+    schema_for_type,
+    validate_tool_args,
+)
 
 
 _current_tool_call_id: ContextVar[str | None] = ContextVar("tool_call_id", default=None)
@@ -82,9 +99,11 @@ class Tool:
                     raise ToolExecutionError(
                         f"Tool {self.name!r} is async; use Tool.arun from an async runtime"
                     )
-            enforce_tool_output_guardrails(output, self.output_guardrails, context=context)
+            enforce_tool_output_guardrails(
+                output, self.output_guardrails, context=context
+            )
             return output
-        except GuardrailTriggered:
+        except (GuardrailTriggered, RunTimeoutError):
             raise
         except (ApprovalRequired, ApprovalRejected):
             raise
@@ -95,16 +114,20 @@ class Tool:
         except Exception as exc:
             raise ToolExecutionError(f"Tool {self.name!r} failed: {exc}") from exc
 
-    async def arun(self, arguments: dict[str, Any] | str, *, context: Any = None) -> Any:
+    async def arun(
+        self, arguments: dict[str, Any] | str, *, context: Any = None
+    ) -> Any:
         try:
             kwargs = self._prepare_arguments(arguments, context=context)
             self._require_approval(kwargs, context=context)
             output = self.func(**kwargs)
             if inspect.isawaitable(output):
                 output = await output
-            enforce_tool_output_guardrails(output, self.output_guardrails, context=context)
+            enforce_tool_output_guardrails(
+                output, self.output_guardrails, context=context
+            )
             return output
-        except GuardrailTriggered:
+        except (GuardrailTriggered, RunTimeoutError):
             raise
         except (ApprovalRequired, ApprovalRejected):
             raise
@@ -118,21 +141,31 @@ class Tool:
     def _require_approval(self, arguments: dict[str, Any], *, context: Any) -> None:
         if not self.requires_approval:
             return
-        tool_call_id = _current_tool_call_id.get() or getattr(context, "state", {}).get("current_tool_call_id", self.name)
+        tool_call_id = _current_tool_call_id.get() or getattr(context, "state", {}).get(
+            "current_tool_call_id", self.name
+        )
         request = ApprovalRequest(
             request_id=str(tool_call_id),
             tool_name=self.name,
             arguments=arguments,
             reason=self.approval_reason,
         )
-        decision = getattr(context, "state", {}).get("approval_decisions", {}).get(request.request_id)
+        decision = (
+            getattr(context, "state", {})
+            .get("approval_decisions", {})
+            .get(request.request_id)
+        )
         policy = getattr(context, "state", {}).get("approval_policy")
         if not isinstance(decision, ApprovalDecision):
             raise ApprovalRequired(request)
         if decision.decision != ApprovalDecisionType.APPROVED:
             raise ApprovalRejected(f"Approval rejected for tool {self.name!r}")
-        if not isinstance(policy, ApprovalPolicy) or not policy.verify(request, decision):
-            raise ApprovalRejected(f"Approval could not be verified for tool {self.name!r}")
+        if not isinstance(policy, ApprovalPolicy) or not policy.verify(
+            request, decision
+        ):
+            raise ApprovalRejected(
+                f"Approval could not be verified for tool {self.name!r}"
+            )
 
     def _prepare_arguments(
         self,
@@ -218,10 +251,7 @@ def _coerce(value: Any, annotation: Any) -> Any:
     if annotation is inspect.Signature.empty or annotation is Any or value is None:
         return value
     try:
-        if (
-            isinstance(annotation, type)
-            and issubclass(annotation, BaseModel)
-        ):
+        if isinstance(annotation, type) and issubclass(annotation, BaseModel):
             return validate_tool_args(value, annotation)
         if annotation in (str, int, float, bool):
             return annotation(value)
