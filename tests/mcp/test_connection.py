@@ -104,7 +104,8 @@ def test_discovery_overlaps_between_servers(use_manager):
         ready = asyncio.Event()
 
         class ConcurrentHttp(ConnectionHttp):
-            async def post_json(self, url, **kwargs):
+            async def post_json(self, url, *, headers=None, data=None, timeout=None):
+                kwargs = {"headers": headers, "data": data, "timeout": timeout}
                 if kwargs["data"]["method"] == "server/discover":
                     started.add(url)
                     if len(started) == 2:

@@ -7,6 +7,7 @@ import inspect
 from typing import Any
 
 from modmex_ai.http.async_client import AsyncHttpClient
+from modmex_ai.http.retries import RetryConfig
 from modmex_ai.http.sse import parse_sse_lines_async
 from modmex_ai.mcp.tools import RemoteTool
 from modmex_ai.mcp.errors import MCPError, MCPInputRequired
@@ -14,6 +15,11 @@ from modmex_ai.mcp.headers import encode_mcp_header_value, extract_mcp_parameter
 from modmex_ai.mcp.headers_provider import MCPHeadersProvider, MCPRequest
 
 MCPHeaders = dict[str, str] | MCPHeadersProvider
+
+# tools/call can have side effects: retry only when the server certainly did not
+# run it (rate limited, or the connection failed before the request was sent).
+TOOL_CALL_RETRY = RetryConfig(status_codes={429}, retry_sent_requests=False)
+_NON_IDEMPOTENT = {"tools/call"}
 
 
 class MCPClient:
@@ -126,6 +132,7 @@ class MCPClient:
             self.url,
             headers=headers,
             data=data,
+            **_supported(self.http.post_json_stream, retry=self._retry(method)),
         )
         async for event in parse_sse_lines_async(chunks):
             yield event
@@ -166,6 +173,7 @@ class MCPClient:
             self.url,
             headers=headers,
             data=self._payload(method, params, request_id),
+            **_supported(self.http.post_json_stream, retry=self._retry(method)),
         )
         async for event in parse_sse_lines_async(chunks):
             yield event
@@ -175,19 +183,27 @@ class MCPClient:
         request_id = self._request_id
         payload = self._payload(method, params, request_id)
         headers = await self._request_headers(method, params, payload)
-        try:
-            response = await self.http.post_json(
-                self.url, headers=headers,
-                data=payload,
-                raise_for_status=False,
-            )
-        except TypeError:  # compatibility with injected test transports
-            response = await self.http.post_json(self.url, headers=headers, data=payload)
+        # Only pass options the transport supports (injected transports may be
+        # minimal). Never retry the call on TypeError: it may already have run.
+        response = await self.http.post_json(
+            self.url,
+            headers=headers,
+            data=payload,
+            **_supported(self.http.post_json, raise_for_status=False, retry=self._retry(method)),
+        )
         if isinstance(response.body, str) and "text/event-stream" in response.headers.get("content-type", "").lower():
             events = [event async for event in parse_sse_lines_async(_single_chunk(response.body.encode()))]
             body = _find_jsonrpc_response(events, request_id)
         else:
             body = response.body
+        status = getattr(response, "status_code", None)
+        if isinstance(status, int) and status >= 400 and not _is_jsonrpc_error(body):
+            raise MCPError(
+                -32603,
+                f"MCP server returned HTTP {status}",
+                data=body,
+                http_status=status,
+            )
         _validate_jsonrpc_envelope(body, request_id)
         if body.get("error") is not None:
             error = body["error"]
@@ -255,8 +271,29 @@ class MCPClient:
         return headers
 
     @staticmethod
+    def _retry(method: str) -> RetryConfig | None:
+        return TOOL_CALL_RETRY if method in _NON_IDEMPOTENT else None
+
+    @staticmethod
     def _encode_header(value: str, *, force: bool = False) -> str:
         return encode_mcp_header_value(value, force=force)
+
+
+def _supported(function: Any, **options: Any) -> dict[str, Any]:
+    """Keep only keyword options ``function`` accepts (and drop ``None`` values)."""
+    try:
+        parameters = inspect.signature(function).parameters
+    except (TypeError, ValueError):
+        return {}
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
+        accepted = set(options)
+    else:
+        accepted = set(parameters)
+    return {k: v for k, v in options.items() if k in accepted and v is not None}
+
+
+def _is_jsonrpc_error(body: Any) -> bool:
+    return isinstance(body, dict) and body.get("jsonrpc") == "2.0" and isinstance(body.get("error"), dict)
 
 
 def _header(headers: dict[str, str], name: str) -> str | None:

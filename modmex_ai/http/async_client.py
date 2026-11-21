@@ -68,6 +68,7 @@ class AsyncHttpClient:
         data: dict[str, Any] | None = None,
         timeout: float | None = None,
         raise_for_status: bool = True,
+        retry: RetryConfig | None = None,
     ) -> HttpResponse:
         async for response in self._post(
             url,
@@ -76,6 +77,7 @@ class AsyncHttpClient:
             timeout=timeout,
             stream=False,
             raise_for_status=raise_for_status,
+            retry=retry,
         ):
             return response
         raise AssertionError("Async HTTP request did not return a response")
@@ -88,6 +90,7 @@ class AsyncHttpClient:
         data: dict[str, Any] | None = None,
         chunk_size: int = 8_192,
         timeout: float | None = None,
+        retry: RetryConfig | None = None,
     ) -> AsyncIterator[bytes]:
         async for response in self._post(
             url,
@@ -95,6 +98,7 @@ class AsyncHttpClient:
             data=data,
             timeout=timeout,
             stream=True,
+            retry=retry,
         ):
             async for chunk in response.aiter_bytes(chunk_size=chunk_size):
                 if chunk:
@@ -109,11 +113,13 @@ class AsyncHttpClient:
         timeout: float | None,
         stream: bool,
         raise_for_status: bool = True,
+        retry: RetryConfig | None = None,
     ) -> AsyncIterator[Any]:
         import asyncio
+        policy = retry or self.retry
         client = await self._get_client()
         emitted = False
-        for attempt in range(self.retry.attempts + 1):
+        for attempt in range(policy.attempts + 1):
             try:
                 if stream:
                     async with client.stream(
@@ -157,7 +163,7 @@ class AsyncHttpClient:
                 raise
             except Exception as error:
                 provider_error = _provider_error(error)
-                delay = None if emitted else self.retry.delay(provider_error, attempt)
+                delay = None if emitted else policy.delay(provider_error, attempt)
                 if delay is None:
                     raise provider_error
                 await bounded_await(asyncio.sleep(delay))
@@ -200,5 +206,8 @@ def _provider_error(error: Exception) -> ProviderError:
             headers=dict(response.headers),
         )
     if isinstance(error, (httpx.TransportError, ConnectionError)):
-        return ProviderConnectionError(str(error) or type(error).__name__)
+        return ProviderConnectionError(
+            str(error) or type(error).__name__,
+            request_sent=not isinstance(error, httpx.ConnectError),
+        )
     return ProviderError(str(error))

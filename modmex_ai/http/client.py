@@ -229,7 +229,9 @@ class HttpClient:
 def _url_error(error: urllib.error.URLError) -> ProviderError:
     if isinstance(error.reason, TimeoutError):
         return ModelTimeoutError("Model request timed out")
-    return ProviderConnectionError(str(error))
+    # urlopen raises URLError while connecting (refused, DNS, TLS handshake),
+    # before the request body reaches the server.
+    return ProviderConnectionError(str(error), request_sent=False)
 
 
 def _multipart_body(
