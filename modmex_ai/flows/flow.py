@@ -643,10 +643,17 @@ class Flow:
         """Build the durable terminal checkpoint a host should save after ``resume``."""
         snapshot = state.session_snapshot
         if snapshot is not None:
+            # The resumed turn's inputs (the approved tool's output) are not output
+            # items; without them the saved history has a call with no result.
+            new_inputs = [
+                item
+                for item in result.input_items[len(snapshot.items) :]
+                if item not in snapshot.items
+            ]
             snapshot = SessionSnapshot(
                 **{
                     **snapshot.model_dump(),
-                    "items": [*snapshot.items, *result.output_items],
+                    "items": [*snapshot.items, *new_inputs, *result.output_items],
                 }
             )
         return PersistedFlowState(
