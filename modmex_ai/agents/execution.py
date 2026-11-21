@@ -236,6 +236,7 @@ class AgentExecution:
             tool_call_id=tool_call.tool_call_id,
             name=tool_call.name,
             arguments=tool_call.arguments,
+            provider_data=tool_call.provider_data,
         )
         self.generated_items.append(item)
         self.context.state["__modmex_ai_approval_checkpoint"] = {
@@ -310,6 +311,7 @@ class AgentExecution:
                         tool_call_id=tool_call.tool_call_id,
                         name=handoff.name,
                         arguments=tool_call.arguments,
+                        provider_data=tool_call.provider_data,
                     ),
                     SessionItem(
                         type="handoff_call_output",

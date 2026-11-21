@@ -13,7 +13,8 @@ call tools, hand off work, and return a controlled result. It fits equally well
 in HTTP APIs, CLIs, background workers, WebSocket servers, notebooks, desktop
 applications, voice systems, and event-driven/serverless workloads.
 
-Its core has no provider SDK dependency. OpenAI is the first complete adapter;
+Its core has no provider SDK dependency. OpenAI and Anthropic (Claude) text
+adapters ship in the box, both on the built-in zero-dependency HTTP transport;
 the core contracts remain reusable for another text, speech, or realtime
 provider.
 
@@ -82,6 +83,71 @@ Multi-agent delegation uses handoff function tools, not a field in the model
 output. A handoff defaults to transfer_to_agent_name; its typed input is
 validated and delivered to an on_handoff callback before the next agent
 continues with the conversation.
+
+## Anthropic (Claude)
+
+`AnthropicMessagesModel` calls `POST /v1/messages` through the same
+zero-dependency transport as the OpenAI adapters, so it adds no packages to a
+Lambda bundle. `api_key` defaults to the `ANTHROPIC_API_KEY` environment
+variable.
+
+```python
+from modmex_ai import Agent, AnthropicSettings, ModelSettings, tool
+from modmex_ai.providers.anthropic import AnthropicMessagesModel
+
+
+@tool
+def get_weather(city: str) -> dict:
+    """Get the current weather for a city."""
+    return {"city": city, "temp_c": 21}
+
+
+agent = Agent(
+    name="weather",
+    instructions="Answer weather questions using the tool.",
+    tools=[get_weather],
+    model=AnthropicMessagesModel("claude-opus-5-5"),
+    settings=ModelSettings(
+        reasoning_effort="high",   # output_config.effort: low|medium|high|xhigh|max
+        anthropic=AnthropicSettings(
+            cache_ttl="5m",        # automatic prompt caching ("5m" or "1h")
+            fallbacks="default",   # server-side fallback if the model declines
+        ),
+    ),
+)
+result = agent.run("What's the weather in Paris?")
+```
+
+How the provider-neutral contracts map to the Messages API:
+
+| modmex-ai | Anthropic |
+|---|---|
+| Leading `system`/`developer` messages | top-level `system` |
+| Later `system`/`developer` messages | mid-conversation `role: "system"` message where the API accepts one, otherwise user text |
+| `function_call` / `function_call_output` items | `tool_use` / `tool_result` blocks (parallel results grouped in one user turn) |
+| `output_type` / `output_schema` | `output_config.format` (JSON schema) |
+| `ModelSettings.reasoning_effort` | `output_config.effort` |
+| `ModelSettings.max_tokens` | `max_tokens` (defaults: 16000, or 64000 when streaming) |
+| `ModelSettings.parallel_tool_calls=False` | `tool_choice: {type: "auto", disable_parallel_tool_use: true}` |
+| `Usage.input_tokens` / `cached_input_tokens` | uncached + cache read + cache write / cache read |
+| `stop_reason: "refusal"` | raises `ModelRefusalError` (so a `FallbackModel` moves on) |
+
+Notes:
+
+- **Thinking blocks are replayed verbatim.** Current Claude models always
+  think, and a tool-use turn must be sent back exactly as it was produced. The
+  adapter stores that turn's content in `ToolCall.provider_data`; the runner
+  copies it to the `function_call` `SessionItem`, and it survives session
+  snapshots and approval checkpoints. Don't edit or drop items from the middle
+  of a session's history while a conversation is in progress.
+- `temperature` and `top_p` raise `ValueError`: API version `2026-10-21`
+  rejects sampling parameters on every model.
+- The Messages API is stateless: `ProviderState` with a remote
+  `previous_response_id`/`conversation_id` is rejected.
+- The default transport retries `529 overloaded` on top of the usual status
+  codes and uses a 300 s timeout, which is still capped by the remaining
+  execution budget.
+- Streaming (`run_stream`) is recommended for long or tool-heavy turns.
 
 ## Multimodal inputs
 

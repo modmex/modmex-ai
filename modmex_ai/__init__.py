@@ -21,6 +21,7 @@ from modmex_ai.agents import (
     prompt_with_handoff_instructions,
 )
 from modmex_ai.models import (
+    AnthropicSettings,
     AsyncModelClient,
     FakeModel,
     FallbackModel,
@@ -119,6 +120,7 @@ from modmex_ai.voice import (
 )
 
 __all__ = [
+    "AnthropicSettings",
     "OpenAISettings",
     "ContextCompactor",
     "CompactionResult",

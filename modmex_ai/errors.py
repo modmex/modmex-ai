@@ -23,6 +23,14 @@ class RateLimitError(ProviderError):
     pass
 
 
+class ModelRefusalError(ProviderError):
+    """The model declined the request (e.g. Anthropic ``stop_reason: refusal``)."""
+
+    def __init__(self, message: str, *, stop_details: object | None = None, **kwargs) -> None:
+        super().__init__(message, **kwargs)
+        self.stop_details = stop_details
+
+
 class ModelTimeoutError(ProviderError):
     pass
 

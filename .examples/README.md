@@ -26,3 +26,15 @@ poetry run python .examples/openai/flow.py
 ```
 
 `.examples/.env` is ignored by git.
+
+## Anthropic smoke test
+
+`anthropic/smoke.py` validates the Anthropic adapter against the real API in five
+checks (plain completion, structured output, a tool loop that replays signed
+thinking blocks, streaming, async). It runs at low effort and costs a few cents.
+
+```bash
+MODMEX_AI_RUN_LIVE=1 ANTHROPIC_API_KEY=... poetry run python .examples/anthropic/smoke.py
+```
+
+`ANTHROPIC_MODEL` overrides the model (default `claude-opus-5-5`).
