@@ -154,6 +154,145 @@ def from_chat_payload(
     )
 
 
+class _ChatStreamAccumulator:
+    """Normalize Chat Completions chunks; shared by the sync and async streams."""
+
+    def __init__(self, *, headers: dict[str, str], status_code: int, model: str) -> None:
+        self.headers = headers
+        self.status_code = status_code
+        self.model = model
+        self.text_parts: list[str] = []
+        self.calls: dict[int, dict[str, str]] = {}
+        self.raw_payloads: list[dict[str, Any]] = []
+
+    def feed(self, payload: dict[str, Any]) -> list[ModelStreamEvent]:
+        self.raw_payloads.append(payload)
+        events: list[ModelStreamEvent] = []
+        choice = (payload.get("choices") or [{}])[0]
+        delta = choice.get("delta") or {}
+        content = delta.get("content")
+        if isinstance(content, str) and content:
+            self.text_parts.append(content)
+            events.append(
+                ModelStreamEvent(
+                    type=ModelStreamEventType.TEXT_DELTA, text_delta=content, raw=payload
+                )
+            )
+        for call in delta.get("tool_calls") or []:
+            index = call.get("index", 0)
+            state = self.calls.setdefault(index, {"id": "", "name": "", "arguments": ""})
+            state["id"] = call.get("id") or state["id"]
+            function = call.get("function") or {}
+            state["name"] = function.get("name") or state["name"]
+            arguments = function.get("arguments") or ""
+            state["arguments"] += arguments
+            events.append(
+                ModelStreamEvent(
+                    type=ModelStreamEventType.TOOL_CALL_DELTA,
+                    tool_call=ToolCall(
+                        tool_call_id=state["id"], name=state["name"], arguments=arguments
+                    ),
+                    raw=payload,
+                )
+            )
+        return events
+
+    def finish(self) -> ModelStreamEvent:
+        return ModelStreamEvent.completed(
+            ModelResponse(
+                output_text="".join(self.text_parts) or None,
+                tool_calls=_accumulated_calls(self.calls),
+                raw=self.raw_payloads,
+                headers=self.headers,
+                status_code=self.status_code,
+                provider="openai",
+                model=self.model,
+            )
+        )
+
+
+class _ResponsesStreamAccumulator:
+    """Normalize typed Responses SSE events, preferring the terminal response."""
+
+    def __init__(self, *, headers: dict[str, str], status_code: int, model: str) -> None:
+        self.headers = headers
+        self.status_code = status_code
+        self.model = model
+        self.text_parts: list[str] = []
+        self.calls: dict[str, dict[str, str]] = {}
+        self.completed: ModelResponse | None = None
+        self.raw_payloads: list[dict[str, Any]] = []
+
+    def feed(self, event: dict[str, Any]) -> list[ModelStreamEvent]:
+        self.raw_payloads.append(event)
+        event_type = event.get("type")
+        if event_type == "response.output_text.delta":
+            delta = event.get("delta", "")
+            if delta:
+                self.text_parts.append(delta)
+                return [
+                    ModelStreamEvent(
+                        type=ModelStreamEventType.TEXT_DELTA, text_delta=delta, raw=event
+                    )
+                ]
+        elif event_type == "response.function_call_arguments.delta":
+            key = event.get("call_id") or event.get("item_id") or ""
+            state = self.calls.setdefault(
+                key, {"id": key, "name": event.get("name", ""), "arguments": ""}
+            )
+            state["name"] = event.get("name") or state["name"]
+            delta = event.get("delta", "")
+            state["arguments"] += delta
+            return [
+                ModelStreamEvent(
+                    type=ModelStreamEventType.TOOL_CALL_DELTA,
+                    tool_call=ToolCall(
+                        tool_call_id=state["id"], name=state["name"], arguments=delta
+                    ),
+                    raw=event,
+                )
+            ]
+        elif event_type == "response.function_call_arguments.done":
+            key = event.get("call_id") or event.get("item_id") or ""
+            state = self.calls.setdefault(key, {"id": key, "name": "", "arguments": ""})
+            state["name"] = event.get("name") or state["name"]
+            state["arguments"] = event.get("arguments") or state["arguments"]
+        elif event_type == "response.completed" and isinstance(event.get("response"), dict):
+            self.completed = from_responses_payload(
+                event["response"],
+                headers=self.headers,
+                status_code=self.status_code,
+                model=self.model,
+            )
+        return []
+
+    def finish(self) -> ModelStreamEvent:
+        if self.completed is not None:
+            return ModelStreamEvent.completed(self.completed)
+        return ModelStreamEvent.completed(
+            ModelResponse(
+                output_text="".join(self.text_parts) or None,
+                tool_calls=_accumulated_calls(self.calls),
+                raw=self.raw_payloads,
+                headers=self.headers,
+                status_code=self.status_code,
+                provider="openai",
+                model=self.model,
+            )
+        )
+
+
+def _accumulated_calls(calls: dict[Any, dict[str, str]]) -> list[ToolCall]:
+    return [
+        ToolCall(
+            tool_call_id=value["id"],
+            name=value["name"],
+            arguments=value["arguments"] or "{}",
+        )
+        for value in calls.values()
+    ]
+
+
 def chat_stream_events(
     payloads: Iterable[dict[str, Any]],
     *,
@@ -162,53 +301,10 @@ def chat_stream_events(
     model: str,
 ):
     """Normalize Chat Completions chunks and finish with one complete response."""
-    text_parts: list[str] = []
-    calls: dict[int, dict[str, str]] = {}
-    raw_payloads: list[dict[str, Any]] = []
+    state = _ChatStreamAccumulator(headers=headers, status_code=status_code, model=model)
     for payload in payloads:
-        raw_payloads.append(payload)
-        choice = (payload.get("choices") or [{}])[0]
-        delta = choice.get("delta") or {}
-        content = delta.get("content")
-        if isinstance(content, str) and content:
-            text_parts.append(content)
-            yield ModelStreamEvent(
-                type=ModelStreamEventType.TEXT_DELTA, text_delta=content, raw=payload
-            )
-        for call in delta.get("tool_calls") or []:
-            index = call.get("index", 0)
-            state = calls.setdefault(index, {"id": "", "name": "", "arguments": ""})
-            state["id"] = call.get("id") or state["id"]
-            function = call.get("function") or {}
-            state["name"] = function.get("name") or state["name"]
-            arguments = function.get("arguments") or ""
-            state["arguments"] += arguments
-            yield ModelStreamEvent(
-                type=ModelStreamEventType.TOOL_CALL_DELTA,
-                tool_call=ToolCall(
-                    tool_call_id=state["id"],
-                    name=state["name"],
-                    arguments=arguments,
-                ),
-                raw=payload,
-            )
-    response = ModelResponse(
-        output_text="".join(text_parts) or None,
-        tool_calls=[
-            ToolCall(
-                tool_call_id=value["id"],
-                name=value["name"],
-                arguments=value["arguments"] or "{}",
-            )
-            for value in calls.values()
-        ],
-        raw=raw_payloads,
-        headers=headers,
-        status_code=status_code,
-        provider="openai",
-        model=model,
-    )
-    yield ModelStreamEvent.completed(response)
+        yield from state.feed(payload)
+    yield state.finish()
 
 
 def responses_stream_events(
@@ -219,64 +315,12 @@ def responses_stream_events(
     model: str,
 ):
     """Normalize typed Responses SSE events and preserve the terminal response."""
-    text_parts: list[str] = []
-    calls: dict[str, dict[str, str]] = {}
-    completed: ModelResponse | None = None
-    raw_payloads: list[dict[str, Any]] = []
+    state = _ResponsesStreamAccumulator(
+        headers=headers, status_code=status_code, model=model
+    )
     for event in payloads:
-        raw_payloads.append(event)
-        event_type = event.get("type")
-        if event_type == "response.output_text.delta":
-            delta = event.get("delta", "")
-            if delta:
-                text_parts.append(delta)
-                yield ModelStreamEvent(
-                    type=ModelStreamEventType.TEXT_DELTA, text_delta=delta, raw=event
-                )
-        elif event_type == "response.function_call_arguments.delta":
-            key = event.get("call_id") or event.get("item_id") or ""
-            state = calls.setdefault(
-                key, {"id": key, "name": event.get("name", ""), "arguments": ""}
-            )
-            state["name"] = event.get("name") or state["name"]
-            delta = event.get("delta", "")
-            state["arguments"] += delta
-            yield ModelStreamEvent(
-                type=ModelStreamEventType.TOOL_CALL_DELTA,
-                tool_call=ToolCall(
-                    tool_call_id=state["id"], name=state["name"], arguments=delta
-                ),
-                raw=event,
-            )
-        elif event_type == "response.function_call_arguments.done":
-            key = event.get("call_id") or event.get("item_id") or ""
-            state = calls.setdefault(key, {"id": key, "name": "", "arguments": ""})
-            state["name"] = event.get("name") or state["name"]
-            state["arguments"] = event.get("arguments") or state["arguments"]
-        elif event_type == "response.completed" and isinstance(
-            event.get("response"), dict
-        ):
-            completed = from_responses_payload(
-                event["response"], headers=headers, status_code=status_code, model=model
-            )
-    if completed is None:
-        completed = ModelResponse(
-            output_text="".join(text_parts) or None,
-            tool_calls=[
-                ToolCall(
-                    tool_call_id=value["id"],
-                    name=value["name"],
-                    arguments=value["arguments"] or "{}",
-                )
-                for value in calls.values()
-            ],
-            raw=raw_payloads,
-            headers=headers,
-            status_code=status_code,
-            provider="openai",
-            model=model,
-        )
-    yield ModelStreamEvent.completed(completed)
+        yield from state.feed(event)
+    yield state.finish()
 
 
 async def chat_stream_events_async(
@@ -287,55 +331,11 @@ async def chat_stream_events_async(
     model: str,
 ):
     """Async counterpart of ``chat_stream_events`` for native SSE clients."""
-    text_parts: list[str] = []
-    calls: dict[int, dict[str, str]] = {}
-    raw_payloads: list[dict[str, Any]] = []
+    state = _ChatStreamAccumulator(headers=headers, status_code=status_code, model=model)
     async for payload in payloads:
-        raw_payloads.append(payload)
-        choice = (payload.get("choices") or [{}])[0]
-        delta = choice.get("delta") or {}
-        content = delta.get("content")
-        if isinstance(content, str) and content:
-            text_parts.append(content)
-            yield ModelStreamEvent(
-                type=ModelStreamEventType.TEXT_DELTA,
-                text_delta=content,
-                raw=payload,
-            )
-        for call in delta.get("tool_calls") or []:
-            index = call.get("index", 0)
-            state = calls.setdefault(index, {"id": "", "name": "", "arguments": ""})
-            state["id"] = call.get("id") or state["id"]
-            function = call.get("function") or {}
-            state["name"] = function.get("name") or state["name"]
-            arguments = function.get("arguments") or ""
-            state["arguments"] += arguments
-            yield ModelStreamEvent(
-                type=ModelStreamEventType.TOOL_CALL_DELTA,
-                tool_call=ToolCall(
-                    tool_call_id=state["id"],
-                    name=state["name"],
-                    arguments=arguments,
-                ),
-                raw=payload,
-            )
-    response = ModelResponse(
-        output_text="".join(text_parts) or None,
-        tool_calls=[
-            ToolCall(
-                tool_call_id=value["id"],
-                name=value["name"],
-                arguments=value["arguments"] or "{}",
-            )
-            for value in calls.values()
-        ],
-        raw=raw_payloads,
-        headers=headers,
-        status_code=status_code,
-        provider="openai",
-        model=model,
-    )
-    yield ModelStreamEvent.completed(response)
+        for event in state.feed(payload):
+            yield event
+    yield state.finish()
 
 
 async def responses_stream_events_async(
@@ -346,71 +346,13 @@ async def responses_stream_events_async(
     model: str,
 ):
     """Async counterpart of ``responses_stream_events`` for native SSE clients."""
-    text_parts: list[str] = []
-    calls: dict[str, dict[str, str]] = {}
-    completed: ModelResponse | None = None
-    raw_payloads: list[dict[str, Any]] = []
+    state = _ResponsesStreamAccumulator(
+        headers=headers, status_code=status_code, model=model
+    )
     async for event in payloads:
-        raw_payloads.append(event)
-        event_type = event.get("type")
-        if event_type == "response.output_text.delta":
-            delta = event.get("delta", "")
-            if delta:
-                text_parts.append(delta)
-                yield ModelStreamEvent(
-                    type=ModelStreamEventType.TEXT_DELTA,
-                    text_delta=delta,
-                    raw=event,
-                )
-        elif event_type == "response.function_call_arguments.delta":
-            key = event.get("call_id") or event.get("item_id") or ""
-            state = calls.setdefault(
-                key, {"id": key, "name": event.get("name", ""), "arguments": ""}
-            )
-            state["name"] = event.get("name") or state["name"]
-            delta = event.get("delta", "")
-            state["arguments"] += delta
-            yield ModelStreamEvent(
-                type=ModelStreamEventType.TOOL_CALL_DELTA,
-                tool_call=ToolCall(
-                    tool_call_id=state["id"],
-                    name=state["name"],
-                    arguments=delta,
-                ),
-                raw=event,
-            )
-        elif event_type == "response.function_call_arguments.done":
-            key = event.get("call_id") or event.get("item_id") or ""
-            state = calls.setdefault(key, {"id": key, "name": "", "arguments": ""})
-            state["name"] = event.get("name") or state["name"]
-            state["arguments"] = event.get("arguments") or state["arguments"]
-        elif event_type == "response.completed" and isinstance(
-            event.get("response"), dict
-        ):
-            completed = from_responses_payload(
-                event["response"],
-                headers=headers,
-                status_code=status_code,
-                model=model,
-            )
-    if completed is None:
-        completed = ModelResponse(
-            output_text="".join(text_parts) or None,
-            tool_calls=[
-                ToolCall(
-                    tool_call_id=value["id"],
-                    name=value["name"],
-                    arguments=value["arguments"] or "{}",
-                )
-                for value in calls.values()
-            ],
-            raw=raw_payloads,
-            headers=headers,
-            status_code=status_code,
-            provider="openai",
-            model=model,
-        )
-    yield ModelStreamEvent.completed(completed)
+        for item in state.feed(event):
+            yield item
+    yield state.finish()
 
 
 def tool_results_to_responses_input(
