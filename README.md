@@ -528,10 +528,10 @@ from modmex_ai import ContextCompactor, CompactionSnapshot, execution_budget
 
 compactor = ContextCompactor(
     model=summary_model,  # Host chooses the model and credentials.
-    threshold=24_000,     # Serialized UTF-8 bytes by default, not tokens.
+    threshold=60_000,     # Estimated tokens (default measure: TokenEstimator).
     keep_recent_turns=4,
-    max_input_size=32_000,
-    max_summary_bytes=6_000,
+    max_input_size=80_000,  # Tokens sent to the summarizer per batch.
+    max_summary_bytes=16_000,
     preservation_instructions="Preserve load IDs, assignments and unresolved requests.",
 )
 with execution_budget(25):  # Shared budget for compaction AND the ensuing agent run.
@@ -544,33 +544,24 @@ with execution_budget(25):  # Shared budget for compaction AND the ensuing agent
 
 ### Measuring in tokens without a tokenizer
 
-The default measure is serialized bytes. To budget in tokens without adding a
-tokenizer dependency or extra API calls, use `TokenEstimator`: it starts at ~4 bytes
-per token and calibrates itself from the input tokens your provider actually billed
-for each request in a run's trace.
+Sizes are tokens estimated by a `TokenEstimator` (the default `measure`). It needs
+no tokenizer dependency and makes no extra API calls: it starts at ~4 bytes per
+token and calibrates itself from the input tokens your provider actually billed for
+each request in a run's trace.
 
 ```python
-from modmex_ai import ContextCompactor, ModelSettings, TokenEstimator
-
-estimator = TokenEstimator()  # optionally TokenEstimator(bytes_per_token=saved_value)
-compactor = ContextCompactor(
-    model=summary_model,
-    measure=estimator,
-    threshold=60_000,         # tokens
-    max_input_size=80_000,    # tokens sent to the summarizer per batch
-    keep_recent_turns=4,
-    settings=ModelSettings(max_tokens=4000, reasoning_effort="low"),
-)
-
 result = compactor.compact(full_history, previous=saved_snapshot)
 response = agent.run(result.messages)
-estimator.observe_trace(response.trace)   # learn the real bytes/token ratio
-saved_value = estimator.bytes_per_token    # persist to keep it across cold starts
+compactor.measure.observe_trace(response.trace)   # learn the real bytes/token ratio
+saved_ratio = compactor.measure.bytes_per_token   # persist across cold starts and pass
+# ContextCompactor(..., measure=TokenEstimator(bytes_per_token=saved_ratio)) next time
 ```
 
 Samples that cannot be a real per-request ratio (for example server-side conversation
 state, where only new messages are sent but the whole conversation is billed) are
 ignored. The ratio is fixed during a `compact` call, so the measure stays deterministic.
+Pass `measure=context_bytes` (and byte thresholds) to budget in serialized bytes, or
+any deterministic, monotonic counter of your own.
 
 Pass the full, append-only history every time, together with the last successful
 CompactionSnapshot (serializable with model_dump()). The snapshot stores summary,
@@ -592,8 +583,7 @@ A single bounded batch is compacted per call. Large turns are not truncated to f
 summarizer. Results report unchanged, compacted, blocked or failed, sizes, duration,
 usage and a safe reason. A compacted result can still exceed the threshold: the host
 must check after_size and choose whether to compact again, defer or reject execution.
-Supply a deterministic, monotonic measure=your_token_counter and thresholds in matching units for token budgets;
-max_summary_bytes remains a byte cap. Empty, oversized, or non-reducing summaries never
+max_summary_bytes is always a byte cap, whatever the measure. Empty, oversized, or non-reducing summaries never
 replace the old snapshot. Provider failures retain the previous effective context and
 unsummarized messages; cancellation and RunTimeoutError propagate. Usage from completed
 summarizer responses is reported even if the summary is rejected. Failed provider calls
@@ -606,8 +596,8 @@ older turns, the compacted view drops it from every completed retained turn (an
 unfinished tool round keeps it), and it is never sent to the summarizer. A summary that
 stops at `max_tokens` is rejected as `summary_truncated` instead of silently losing
 history. Thinking models (Claude, OpenAI reasoning models) spend part of `max_tokens`
-on reasoning, so give the summarizer room, e.g.
-`settings=ModelSettings(max_tokens=4000, reasoning_effort="low")`.
+on reasoning; the default summarizer `max_tokens` is 8000. For a cheaper summary,
+add `reasoning_effort="low"` where the summarizer model supports it.
 
 The compactor does not change provider_state or server-managed conversations. Hosts
 must rebuild/clear incompatible provider state when replacing raw history with a summary;

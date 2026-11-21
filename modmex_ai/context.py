@@ -161,8 +161,10 @@ def _open_call_ids(history):
 class ContextCompactor:
     """Compact an append-only full history; the caller persists the returned snapshot.
 
-    Size functions must be deterministic, monotonic, non-negative, and use the same units as
-    threshold/max_input_size. Supply a tokenizer-backed function for token budgets.
+    By default sizes are tokens estimated by a ``TokenEstimator`` (``self.measure``);
+    feed it each run's trace with ``compactor.measure.observe_trace(result.trace)``.
+    A custom measure must be deterministic, monotonic, non-negative, and use the same
+    units as threshold/max_input_size (e.g. ``measure=context_bytes`` for bytes).
     Instructions are retained verbatim. Provider state must be managed by the host.
     """
 
@@ -170,13 +172,13 @@ class ContextCompactor:
         self,
         *,
         model: ModelClient,
-        threshold: int = 24_000,
+        threshold: int = 60_000,
         keep_recent_turns: int = 4,
-        max_input_size: int = 32_000,
-        max_summary_bytes: int = 6_000,
+        max_input_size: int = 80_000,
+        max_summary_bytes: int = 16_000,
         settings: ModelSettings | None = None,
         preservation_instructions: str = "",
-        measure: Callable = context_bytes,
+        measure: Callable | None = None,
     ):
         for name, value in {
             "threshold": threshold,
@@ -191,9 +193,10 @@ class ContextCompactor:
         self.keep_recent_turns = keep_recent_turns
         self.max_input_size = max_input_size
         self.max_summary_bytes = max_summary_bytes
-        self.settings = settings or ModelSettings(max_tokens=700)
+        # Room for a ~4k-token summary plus the reasoning thinking models spend first.
+        self.settings = settings or ModelSettings(max_tokens=8_000)
         self.preservation_instructions = preservation_instructions
-        self.measure = measure
+        self.measure = measure if measure is not None else TokenEstimator()
 
     def compact(
         self,

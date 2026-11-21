@@ -129,7 +129,7 @@ def test_pending_tool_call_retained_and_orphan_output_rejected():
         compactor(FakeModel([])).compact(items)
 
 
-@pytest.mark.parametrize("summary", ["", " " * 3, "x" * 6001])
+@pytest.mark.parametrize("summary", ["", " " * 3, "x" * 16_001])
 def test_invalid_summary_keeps_original_context(summary):
     items = history()
     result = compactor(FakeModel([summary])).compact(items)
@@ -391,3 +391,11 @@ def test_compactor_uses_token_estimator_as_measure():
     assert result.before_size == tokens and result.after_size < tokens
     # Same history, above threshold in bytes but below in tokens: unchanged.
     assert ContextCompactor(model=model, measure=estimator, threshold=tokens + 1).compact(original).status == "unchanged"
+
+
+def test_default_measure_is_a_per_instance_token_estimator():
+    first = ContextCompactor(model=FakeModel([]))
+    second = ContextCompactor(model=FakeModel([]))
+    assert isinstance(first.measure, TokenEstimator)
+    assert first.measure is not second.measure
+    assert first.threshold == 60_000 and first.settings.max_tokens == 8_000
