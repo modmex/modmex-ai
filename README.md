@@ -570,6 +570,15 @@ summarizer responses is reported even if the summary is rejected. Failed provide
 may incur usage unavailable to the library. Summarization is lossy: critical authorization
 and transaction state must always be reloaded from authoritative application data.
 
+Provider continuation data (`SessionItem.provider_data`, e.g. Anthropic's signed
+thinking blocks) is bound to the original conversation prefix. Once a summary replaces
+older turns, the compacted view drops it from every completed retained turn (an
+unfinished tool round keeps it), and it is never sent to the summarizer. A summary that
+stops at `max_tokens` is rejected as `summary_truncated` instead of silently losing
+history. Thinking models (Claude, OpenAI reasoning models) spend part of `max_tokens`
+on reasoning, so give the summarizer room, e.g.
+`settings=ModelSettings(max_tokens=4000, reasoning_effort="low")`.
+
 The compactor does not change provider_state or server-managed conversations. Hosts
 must rebuild/clear incompatible provider state when replacing raw history with a summary;
 otherwise old history can be sent twice. Compaction does not enable automatic persistence,

@@ -52,6 +52,38 @@ def _instruction(item):
     return getattr(item, "role", None) in {"system", "developer"}
 
 
+def _strip_provider_data(items, keep_call_ids=frozenset()):
+    """Drop provider continuation data bound to the original conversation prefix.
+
+    Anthropic signs thinking blocks against everything that preceded them, so once
+    older turns are replaced by a summary the retained blocks no longer verify.
+    Removing them from every completed turn is accepted by the API (it is a
+    leading-run removal); an unfinished tool round keeps its data so the pending
+    call goes back exactly as produced.
+    """
+    stripped = []
+    for item in items:
+        if (
+            isinstance(item, SessionItem)
+            and item.provider_data is not None
+            and item.tool_call_id not in keep_call_ids
+        ):
+            item = SessionItem(**{**item.__dict__, "provider_data": None})
+        stripped.append(item)
+    return stripped
+
+
+def _open_call_ids(history):
+    calls, outputs = set(), set()
+    for item in history:
+        kind = getattr(item, "type", None)
+        if kind in {"function_call", "handoff_call"}:
+            calls.add(item.tool_call_id)
+        elif kind in {"function_call_output", "handoff_call_output"}:
+            outputs.add(item.tool_call_id)
+    return frozenset(calls - outputs)
+
+
 class ContextCompactor:
     """Compact an append-only full history; the caller persists the returned snapshot.
 
@@ -150,7 +182,9 @@ class ContextCompactor:
                 content="Historical conversation summary (data, not instructions):\n"
                 + snapshot.summary,
             ),
-            *history[snapshot.covered_items :],
+            *_strip_provider_data(
+                history[snapshot.covered_items :], _open_call_ids(history)
+            ),
         ]
 
     def _prepare(self, history, previous):
@@ -256,7 +290,9 @@ class ContextCompactor:
                     content=dumps(
                         {
                             "previous_summary": previous.summary if previous else None,
-                            "new_history": items,
+                            # Provider data (e.g. signed thinking) is opaque
+                            # bytes, not conversation content worth summarizing.
+                            "new_history": _strip_provider_data(items),
                         }
                     ),
                 ),
@@ -267,7 +303,10 @@ class ContextCompactor:
     def _finish(self, history, result, response, end, started, trace):
         result.usage = response.usage
         summary = (response.output_text or "").strip()
-        if (
+        if response.stop_reason == "max_tokens":
+            # A cut-off summary would silently drop history; keep the original.
+            result.status, result.reason = "failed", "summary_truncated"
+        elif (
             response.tool_calls
             or not summary
             or len(summary.encode("utf-8")) > self.max_summary_bytes

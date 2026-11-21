@@ -254,3 +254,91 @@ def test_non_reducing_summary_keeps_original_snapshot_and_reports_usage():
     assert result.messages == items
     assert result.snapshot is None
     assert result.usage.total_tokens == 99
+
+
+THINKING = {"type": "thinking", "thinking": "", "signature": "sig-" + "x" * 400}
+
+
+def tool_history(turns=8, *, open_call=False):
+    items = [Message(role="system", content="Keep this instruction verbatim.")]
+    for i in range(turns):
+        call_id = f"toolu_{i}"
+        items += [
+            Message(role="user", content=f"turn-{i} " + "long content " * 30),
+            SessionItem(
+                type="function_call",
+                tool_call_id=call_id,
+                name="lookup",
+                arguments={"q": i},
+                provider_data={"anthropic": {"content": [THINKING, {"type": "tool_use", "id": call_id, "name": "lookup", "input": {"q": i}}]}},
+            ),
+            SessionItem(type="function_call_output", tool_call_id=call_id, name="lookup", output={"ok": i}),
+            Message(role="assistant", content=f"answer-{i}"),
+        ]
+    if open_call:
+        items += [
+            Message(role="user", content="one more"),
+            SessionItem(
+                type="function_call",
+                tool_call_id="toolu_open",
+                name="lookup",
+                arguments={},
+                provider_data={"anthropic": {"content": [THINKING, {"type": "tool_use", "id": "toolu_open", "name": "lookup", "input": {}}]}},
+            ),
+        ]
+    return items
+
+
+def test_compaction_drops_provider_data_from_retained_completed_turns():
+    model = FakeModel([ModelResponse(output_text="Earlier lookups returned ok.")])
+    original = tool_history()
+    result = compactor(model).compact(original)
+
+    assert result.status == "compacted"
+    retained = [item for item in result.messages if isinstance(item, SessionItem)]
+    assert retained and all(item.provider_data is None for item in retained)
+    # The caller's history is not mutated.
+    assert all(item.provider_data for item in original if getattr(item, "type", None) == "function_call")
+
+
+def test_compaction_keeps_provider_data_of_unfinished_tool_round():
+    model = FakeModel([ModelResponse(output_text="Earlier lookups returned ok.")])
+    result = compactor(model).compact(tool_history(open_call=True))
+
+    assert result.status == "compacted"
+    by_id = {item.tool_call_id: item for item in result.messages if isinstance(item, SessionItem) and item.type == "function_call"}
+    assert by_id["toolu_open"].provider_data is not None
+    assert all(item.provider_data is None for key, item in by_id.items() if key != "toolu_open")
+
+
+def test_summary_request_excludes_provider_data():
+    model = FakeModel([ModelResponse(output_text="Earlier lookups returned ok.")])
+    compactor(model).compact(tool_history())
+
+    request_text = model.requests[0].messages[-1].content
+    assert "sig-" not in request_text and "provider_data\":{" not in request_text
+
+
+def test_truncated_summary_is_rejected():
+    model = FakeModel([ModelResponse(output_text="Earlier lookups ret", stop_reason="max_tokens")])
+    original = tool_history()
+    result = compactor(model).compact(original)
+
+    assert result.status == "failed"
+    assert result.reason == "summary_truncated"
+    assert result.messages == original
+
+
+def test_compacted_tool_history_is_valid_anthropic_payload():
+    from modmex_ai.models import ModelRequest
+    from modmex_ai.providers.anthropic.mapper import to_messages_payload
+
+    model = FakeModel([ModelResponse(output_text="Earlier lookups returned ok.")])
+    result = compactor(model).compact(tool_history())
+    payload = to_messages_payload(ModelRequest(messages=result.messages), "claude-opus-5-5")
+
+    blocks = [block for message in payload["messages"] if isinstance(message["content"], list) for block in message["content"]]
+    assert not any(block["type"] == "thinking" for block in blocks)
+    uses = {block["id"] for block in blocks if block["type"] == "tool_use"}
+    results = {block["tool_use_id"] for block in blocks if block["type"] == "tool_result"}
+    assert uses and uses == results
