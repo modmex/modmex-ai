@@ -14,6 +14,7 @@ it to the ``SessionItem`` and this mapper replays it verbatim.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from base64 import b64decode, b64encode
 from collections.abc import AsyncIterable, Iterable
@@ -63,7 +64,8 @@ def to_messages_payload(
     request: ModelRequest, model: str, *, stream: bool = False
 ) -> dict[str, Any]:
     _check_provider_state(request)
-    system, messages = _split_messages(request.messages)
+    replays: list[tuple[str | None, list[dict[str, Any]]]] = []
+    system, messages = _split_messages(request.messages, replays)
     settings = request.settings
     max_tokens = settings.max_tokens if settings and settings.max_tokens else None
     payload: dict[str, Any] = {
@@ -76,6 +78,7 @@ def to_messages_payload(
         payload["system"] = system
     if request.tools:
         payload["tools"] = [_tool_payload(request, tool) for tool in request.tools]
+    _drop_stale_thinking(messages, replays, binding_digest(payload))
     output_config: dict[str, Any] = {}
     if request.output_schema:
         output_config["format"] = {
@@ -99,6 +102,46 @@ def beta_headers(request: ModelRequest) -> list[str]:
     if settings.fallbacks is not None and FALLBACK_BETA not in betas:
         betas.append(FALLBACK_BETA)
     return betas
+
+
+def binding_digest(payload: dict[str, Any]) -> str:
+    """Fingerprint of what a thinking signature is bound to besides the messages.
+
+    Anthropic binds each thinking block to the ``system`` prompt and the *set* of
+    tools (order-insensitive) it was produced with. A tool_selector that changes
+    the tools, or a handoff to an agent with other instructions, changes it.
+    """
+    tools = sorted(payload.get("tools") or [], key=lambda tool: tool.get("name", ""))
+    material = json.dumps(
+        {"system": payload.get("system"), "tools": tools},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _drop_stale_thinking(
+    turns: list[dict[str, Any]],
+    replays: list[tuple[str | None, list[dict[str, Any]]]],
+    current: str,
+) -> None:
+    """Remove thinking blocks whose binding no longer matches this request.
+
+    The API accepts removing a *leading* run of thinking blocks but not a gap in
+    the middle, so everything up to the last stale block goes. Blocks recorded
+    without a binding (older data) are treated as current.
+    """
+    last_stale = max(
+        (index for index, (binding, _) in enumerate(replays) if binding not in (None, current)),
+        default=-1,
+    )
+    if last_stale < 0:
+        return
+    stale = {id(block) for _, blocks in replays[: last_stale + 1] for block in blocks}
+    for turn in turns:
+        if isinstance(turn["content"], list):
+            turn["content"] = [b for b in turn["content"] if id(b) not in stale]
 
 
 def _check_provider_state(request: ModelRequest) -> None:
@@ -220,6 +263,7 @@ def _normalize_schema(schema: Any) -> Any:
 
 def _split_messages(
     items: list[Message | SessionItem],
+    replays: list[tuple[str | None, list[dict[str, Any]]]] | None = None,
 ) -> tuple[str | None, list[dict[str, Any]]]:
     """Leading system/developer text becomes ``system``; the rest becomes turns.
 
@@ -243,7 +287,7 @@ def _split_messages(
                 turns.append({"role": "system", "content": text})
             continue
         if isinstance(item, SessionItem) and item.type != "message":
-            _append_operation(turns, item, replayed_tool_ids)
+            _append_operation(turns, item, replayed_tool_ids, replays)
             continue
         message = _message_of(item)
         if message.role == "tool":
@@ -291,12 +335,27 @@ def _message_of(item: Message | SessionItem) -> Message:
 
 
 def _append_operation(
-    turns: list[dict[str, Any]], item: SessionItem, replayed_tool_ids: set[str]
+    turns: list[dict[str, Any]],
+    item: SessionItem,
+    replayed_tool_ids: set[str],
+    replays: list[tuple[str | None, list[dict[str, Any]]]] | None = None,
 ) -> None:
     if item.type in ("function_call", "handoff_call"):
         replay = _replay_content(item)
         if replay is not None:
             turns.append({"role": "assistant", "content": replay})
+            if replays is not None:
+                replays.append(
+                    (
+                        _replay_binding(item),
+                        [
+                            block
+                            for block in replay
+                            if isinstance(block, dict)
+                            and block.get("type") in {"thinking", "redacted_thinking"}
+                        ],
+                    )
+                )
             replayed_tool_ids.update(
                 block.get("id")
                 for block in replay
@@ -329,6 +388,13 @@ def _replay_content(item: SessionItem) -> list[dict[str, Any]] | None:
     anthropic = data.get(PROVIDER) if isinstance(data, dict) else None
     content = anthropic.get("content") if isinstance(anthropic, dict) else None
     return deepcopy(content) if isinstance(content, list) and content else None
+
+
+def _replay_binding(item: SessionItem) -> str | None:
+    data = item.provider_data or {}
+    anthropic = data.get(PROVIDER) if isinstance(data, dict) else None
+    binding = anthropic.get("binding") if isinstance(anthropic, dict) else None
+    return binding if isinstance(binding, str) else None
 
 
 def _append_blocks(
@@ -462,7 +528,12 @@ def _content_inputs(content: Any) -> list[TextInput | FileInput | ImageInput]:
 
 
 def from_messages_payload(
-    payload: dict[str, Any], *, headers: dict[str, str], status_code: int, model: str
+    payload: dict[str, Any],
+    *,
+    headers: dict[str, str],
+    status_code: int,
+    model: str,
+    binding: str | None = None,
 ) -> ModelResponse:
     content = payload.get("content") or []
     stop_reason = payload.get("stop_reason")
@@ -494,7 +565,10 @@ def from_messages_payload(
             headers=headers,
         )
     if tool_calls:
-        tool_calls[0].provider_data = {PROVIDER: {"content": deepcopy(content)}}
+        replay: dict[str, Any] = {"content": deepcopy(content)}
+        if binding is not None:
+            replay["binding"] = binding
+        tool_calls[0].provider_data = {PROVIDER: replay}
     text = "".join(
         block.get("text", "") for block in content if block.get("type") == "text"
     )
@@ -545,7 +619,15 @@ def _header(headers: dict[str, str], name: str) -> str | None:
 class _StreamAccumulator:
     """Rebuild the final Message from SSE events while emitting deltas."""
 
-    def __init__(self, *, headers: dict[str, str], status_code: int, model: str) -> None:
+    def __init__(
+        self,
+        *,
+        headers: dict[str, str],
+        status_code: int,
+        model: str,
+        binding: str | None = None,
+    ) -> None:
+        self.binding = binding
         self.headers = headers
         self.status_code = status_code
         self.model = model
@@ -638,7 +720,11 @@ class _StreamAccumulator:
         message = dict(self.message)
         message["content"] = [self.blocks[index] for index in sorted(self.blocks)]
         return from_messages_payload(
-            message, headers=self.headers, status_code=self.status_code, model=self.model
+            message,
+            headers=self.headers,
+            status_code=self.status_code,
+            model=self.model,
+            binding=self.binding,
         )
 
 
@@ -648,8 +734,11 @@ def messages_stream_events(
     headers: dict[str, str],
     status_code: int,
     model: str,
+    binding: str | None = None,
 ):
-    state = _StreamAccumulator(headers=headers, status_code=status_code, model=model)
+    state = _StreamAccumulator(
+        headers=headers, status_code=status_code, model=model, binding=binding
+    )
     for payload in payloads:
         yield from state.feed(payload)
     yield ModelStreamEvent.completed(state.finish())
@@ -661,8 +750,11 @@ async def messages_stream_events_async(
     headers: dict[str, str],
     status_code: int,
     model: str,
+    binding: str | None = None,
 ):
-    state = _StreamAccumulator(headers=headers, status_code=status_code, model=model)
+    state = _StreamAccumulator(
+        headers=headers, status_code=status_code, model=model, binding=binding
+    )
     async for payload in payloads:
         for event in state.feed(payload):
             yield event

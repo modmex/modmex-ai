@@ -390,3 +390,50 @@ def test_stream_error_event_raises():
             )
         )
     assert excinfo.value.status_code == 529
+
+
+def _replayed_call(call_id, signature, binding):
+    return SessionItem(
+        type="function_call",
+        tool_call_id=call_id,
+        name="a",
+        arguments={},
+        provider_data={"anthropic": {"binding": binding, "content": [
+            {"type": "thinking", "thinking": "", "signature": signature},
+            {"type": "tool_use", "id": call_id, "name": "a", "input": {}},
+        ]}},
+    )
+
+
+def _history_with(bindings):
+    items = [Message(role="system", content="Agent B"), Message(role="user", content="go")]
+    for index, binding in enumerate(bindings):
+        items += [
+            _replayed_call(f"t{index}", f"sig-{index}", binding),
+            SessionItem(type="function_call_output", tool_call_id=f"t{index}", output="ok"),
+        ]
+    return items
+
+
+def _signatures(payload):
+    return [b["signature"] for m in payload["messages"] if m["role"] == "assistant" for b in m["content"] if b["type"] == "thinking"]
+
+
+def test_stale_thinking_is_removed_as_a_leading_run():
+    from modmex_ai.providers.anthropic.mapper import binding_digest
+
+    current = binding_digest({"system": "Agent B"})
+    payload = _payload(messages=_history_with(["old", current, "old", current, None]))
+    # Last stale block is index 2: blocks 0..2 go, later current/legacy ones stay.
+    assert _signatures(payload) == ["sig-3", "sig-4"]
+
+
+def test_handoff_to_agent_with_other_instructions_drops_previous_thinking():
+    from modmex_ai.providers.anthropic.mapper import binding_digest
+
+    agent_a = binding_digest({"system": "Agent A"})
+    payload = _payload(messages=_history_with([agent_a, agent_a]))
+    assert _signatures(payload) == []
+    # Same agent, same tools: nothing is removed.
+    same = binding_digest({"system": "Agent B"})
+    assert _signatures(_payload(messages=_history_with([same, same]))) == ["sig-0", "sig-1"]

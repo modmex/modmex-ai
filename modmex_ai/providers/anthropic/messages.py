@@ -12,6 +12,7 @@ from modmex_ai.http import (
 from modmex_ai.models import AsyncModelClient, ModelRequest, ModelResponse
 from modmex_ai.providers.anthropic.mapper import (
     beta_headers,
+    binding_digest,
     from_messages_payload,
     messages_stream_events,
     messages_stream_events_async,
@@ -69,10 +70,11 @@ class AnthropicMessagesModel(AsyncModelClient):
         return f"{self.base_url}/messages"
 
     def complete(self, request: ModelRequest) -> ModelResponse:
+        payload = to_messages_payload(request, self.model)
         response = self.http_client.post_json(
             self._url,
             headers=self._headers(request),
-            data=to_messages_payload(request, self.model),
+            data=payload,
             timeout=_timeout(request),
         )
         return from_messages_payload(
@@ -80,6 +82,7 @@ class AnthropicMessagesModel(AsyncModelClient):
             headers=response.headers,
             status_code=response.status_code,
             model=self.model,
+            binding=binding_digest(payload),
         )
 
     async def aclose(self) -> None:
@@ -91,10 +94,11 @@ class AnthropicMessagesModel(AsyncModelClient):
         import asyncio
         if self.async_http_client is None:
             return await asyncio.to_thread(self.complete, request)
+        payload = to_messages_payload(request, self.model)
         response = await self.async_http_client.post_json(
             self._url,
             headers=self._headers(request),
-            data=to_messages_payload(request, self.model),
+            data=payload,
             timeout=_timeout(request),
         )
         return from_messages_payload(
@@ -102,26 +106,33 @@ class AnthropicMessagesModel(AsyncModelClient):
             headers=response.headers,
             status_code=response.status_code,
             model=self.model,
+            binding=binding_digest(payload),
         )
 
     def stream(self, request: ModelRequest):
+        payload = to_messages_payload(request, self.model, stream=True)
         chunks = self.http_client.post_json_stream(
             self._url,
             headers=self._headers(request),
-            data=to_messages_payload(request, self.model, stream=True),
+            data=payload,
             timeout=_timeout(request),
         )
         yield from messages_stream_events(
-            parse_sse_lines(chunks), headers={}, status_code=200, model=self.model
+            parse_sse_lines(chunks),
+            headers={},
+            status_code=200,
+            model=self.model,
+            binding=binding_digest(payload),
         )
 
     async def astream(self, request: ModelRequest):
         import asyncio
         if self.async_http_client is not None:
+            payload = to_messages_payload(request, self.model, stream=True)
             chunks = self.async_http_client.post_json_stream(
                 self._url,
                 headers=self._headers(request),
-                data=to_messages_payload(request, self.model, stream=True),
+                data=payload,
                 timeout=_timeout(request),
             )
             async for event in messages_stream_events_async(
@@ -129,6 +140,7 @@ class AnthropicMessagesModel(AsyncModelClient):
                 headers={},
                 status_code=200,
                 model=self.model,
+                binding=binding_digest(payload),
             ):
                 yield event
             return

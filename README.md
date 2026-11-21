@@ -138,8 +138,13 @@ Notes:
   think, and a tool-use turn must be sent back exactly as it was produced. The
   adapter stores that turn's content in `ToolCall.provider_data`; the runner
   copies it to the `function_call` `SessionItem`, and it survives session
-  snapshots and approval checkpoints. Don't edit or drop items from the middle
-  of a session's history while a conversation is in progress.
+  snapshots and approval checkpoints. Each replayed turn also records a
+  fingerprint of the `system` prompt and tool set it was produced with; if a
+  `tool_selector` changes the tools or a handoff moves the history to an agent
+  with other instructions, the now-invalid thinking blocks are dropped
+  automatically (as a leading run, which the API accepts) while text and tool
+  calls stay. With stable tools and instructions nothing is dropped. Don't edit
+  or remove items from the middle of a session's history yourself.
 - `temperature` and `top_p` raise `ValueError`: API version `2026-10-21`
   rejects sampling parameters on every model.
 - The Messages API is stateless: `ProviderState` with a remote

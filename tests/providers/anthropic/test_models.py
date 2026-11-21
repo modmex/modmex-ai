@@ -141,3 +141,55 @@ def test_agent_tool_loop_replays_thinking_blocks():
         "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": '{"city":"Paris","temp_c":21}'}],
     }
     assert result.usage.input_tokens == 53
+
+
+def _tool_turn(call_id, name, signature):
+    return {
+        "id": f"msg_{call_id}",
+        "content": [
+            {"type": "thinking", "thinking": "", "signature": signature},
+            {"type": "tool_use", "id": call_id, "name": name, "input": {}},
+        ],
+        "stop_reason": "tool_use",
+        "usage": {"input_tokens": 10, "output_tokens": 5},
+    }
+
+
+def test_tool_selector_change_drops_now_invalid_thinking():
+    @tool
+    def first_step() -> str:
+        """Step one."""
+        return "one"
+
+    @tool
+    def second_step() -> str:
+        """Step two."""
+        return "two"
+
+    selections = iter([["first_step"], ["first_step", "second_step"], ["first_step", "second_step"]])
+    http = FakeHttpClient(
+        _tool_turn("toolu_1", "first_step", "sig-A"),
+        _tool_turn("toolu_2", "second_step", "sig-B"),
+        _text("done"),
+    )
+    agent = Agent(
+        name="phases",
+        instructions="Do the steps.",
+        tools=[first_step, second_step],
+        tool_selector=lambda ctx, names: next(selections),
+        model=AnthropicMessagesModel("claude-opus-5-5", api_key="k", http_client=http),
+    )
+
+    assert agent.run("go").output == "done"
+    second, third = http.calls[1]["data"], http.calls[2]["data"]
+
+    def signatures(data):
+        return [b["signature"] for m in data["messages"] if m["role"] == "assistant" for b in m["content"] if b["type"] == "thinking"]
+
+    # Tools changed between call 1 and 2: sig-A was bound to the old tool set.
+    assert signatures(second) == []
+    # Tools stable between call 2 and 3: sig-B is still valid and kept; sig-A stays dropped.
+    assert signatures(third) == ["sig-B"]
+    # tool_use blocks are always kept, so the history stays consistent.
+    uses = [b["id"] for m in third["messages"] if m["role"] == "assistant" for b in m["content"] if b["type"] == "tool_use"]
+    assert uses == ["toolu_1", "toolu_2"]
