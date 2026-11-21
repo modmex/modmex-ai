@@ -151,6 +151,10 @@ class Agent:
         with execution_budget(self.execution_timeout):
             return await bounded_await(self._run_async(input, **kwargs))
 
+    async def arun(self, input: Any, **kwargs: Any) -> AgentResult:
+        """Async run; same as :meth:`run_async`, named like ``arun_stream``/``Tool.arun``."""
+        return await self.run_async(input, **kwargs)
+
     def run_stream(self, input: Any, **kwargs: Any):
         with execution_budget(self.execution_timeout):
             yield from self._run_stream(input, **kwargs)

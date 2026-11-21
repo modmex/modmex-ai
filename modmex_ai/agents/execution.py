@@ -63,6 +63,11 @@ class AgentExecution:
             agent.tools
         ):
             raise ValueError("Registered tools and handoffs must have unique names")
+        if self.tool_schemas and not self.model.profile.supports_tools:
+            raise ValueError(
+                f"Agent {agent.name!r} has tools or handoffs but model "
+                f"{getattr(self.model, 'name', self.model)!r} does not support tools"
+            )
         self.output_schema = agent._output_schema()
         self.tool_call_count = 0
         self.output_guardrail_retry_count = 0

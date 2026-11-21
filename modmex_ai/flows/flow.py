@@ -105,6 +105,10 @@ class Flow:
                 break
         return state.finish()
 
+    async def arun(self, input: Any, **kwargs: Any) -> FlowResult:
+        """Async run; same as :meth:`run_async`, named like ``arun_stream``."""
+        return await self.run_async(input, **kwargs)
+
     def run_stream(
         self,
         input: Any,

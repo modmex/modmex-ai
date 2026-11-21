@@ -57,3 +57,16 @@ def test_flow_resume_async_executes_approved_async_tool():
 
     assert asyncio.run(run()).output == "done"
     assert called == ["x"]
+
+
+def test_arun_aliases_run_async_on_agent_and_flow():
+    import asyncio
+
+    from modmex_ai import Agent, FakeModel, Flow
+
+    async def run():
+        agent = Agent(name="a", instructions="x", model=FakeModel(["one", "two"]))
+        flow = Flow(name="f", entrypoint=agent, agents=[])
+        return (await agent.arun("hi")).output, (await flow.arun("hi")).output
+
+    assert asyncio.run(run()) == ("one", "two")

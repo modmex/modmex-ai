@@ -145,3 +145,17 @@ def test_agent_async_run_falls_back():
 
     agent = Agent(name="a", instructions="x", model=FallbackModel([_Broken(), _ok("from backup")]))
     assert asyncio.run(agent.run_async("hi")).output == "from backup"
+
+
+def test_agent_with_tools_fails_fast_on_a_model_without_tool_support():
+    from modmex_ai import Agent, tool
+
+    @tool
+    def ping() -> str:
+        """Ping."""
+        return "pong"
+
+    model = FakeModel(["unused"], profile=ModelProfile(supports_tools=False))
+    with pytest.raises(ValueError, match="does not support tools"):
+        Agent(name="a", instructions="x", tools=[ping], model=model).run("hi")
+    assert model.requests == []

@@ -437,3 +437,17 @@ def test_handoff_to_agent_with_other_instructions_drops_previous_thinking():
     # Same agent, same tools: nothing is removed.
     same = binding_digest({"system": "Agent B"})
     assert _signatures(_payload(messages=_history_with([same, same]))) == ["sig-0", "sig-1"]
+
+
+def test_failed_tool_result_is_flagged_as_error():
+    failure = {"ok": False, "error": {"code": "tool_failed", "retryable": False, "message": "x"}}
+    payload = _payload(messages=[
+        Message(role="user", content="go"),
+        SessionItem(type="function_call", tool_call_id="t1", name="a", arguments={}),
+        SessionItem(type="function_call_output", tool_call_id="t1", output=failure),
+        SessionItem(type="function_call", tool_call_id="t2", name="a", arguments={}),
+        SessionItem(type="function_call_output", tool_call_id="t2", output={"ok": True}),
+    ])
+    results = [b for m in payload["messages"] for b in m["content"] if b["type"] == "tool_result"]
+    assert results[0]["is_error"] is True
+    assert "is_error" not in results[1]

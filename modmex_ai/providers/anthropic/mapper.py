@@ -411,11 +411,23 @@ def _append_blocks(
 def _tool_result_block(tool_use_id: str | None, output: Any) -> dict[str, Any]:
     if not tool_use_id:
         raise ValueError("Tool results require the originating tool_call_id")
-    return {
+    block: dict[str, Any] = {
         "type": "tool_result",
         "tool_use_id": tool_use_id,
         "content": output if isinstance(output, str) else dumps(output),
     }
+    if _is_tool_failure(output):
+        block["is_error"] = True
+    return block
+
+
+def _is_tool_failure(output: Any) -> bool:
+    """The envelope ToolExecutor returns for a failed call under "return_error"."""
+    return (
+        isinstance(output, dict)
+        and output.get("ok") is False
+        and isinstance(output.get("error"), dict)
+    )
 
 
 def _arguments_object(value: Any) -> dict[str, Any]:
