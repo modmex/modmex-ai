@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import importlib.util
 from collections.abc import AsyncIterator
 from typing import Any
@@ -110,6 +109,7 @@ class AsyncHttpClient:
         stream: bool,
         raise_for_status: bool = True,
     ) -> AsyncIterator[Any]:
+        import asyncio
         client = await self._get_client()
         emitted = False
         for attempt in range(self.retry.attempts + 1):

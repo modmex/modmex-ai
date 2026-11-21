@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import os
 
 from modmex_ai.http import (
@@ -89,6 +88,7 @@ class AnthropicMessagesModel(AsyncModelClient):
             await self.async_http_client.close()
 
     async def acomplete(self, request: ModelRequest) -> ModelResponse:
+        import asyncio
         if self.async_http_client is None:
             return await asyncio.to_thread(self.complete, request)
         response = await self.async_http_client.post_json(
@@ -116,6 +116,7 @@ class AnthropicMessagesModel(AsyncModelClient):
         )
 
     async def astream(self, request: ModelRequest):
+        import asyncio
         if self.async_http_client is not None:
             chunks = self.async_http_client.post_json_stream(
                 self._url,

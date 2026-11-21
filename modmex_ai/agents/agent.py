@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import math
 from modmex_ai.budget import execution_budget, bounded_await
@@ -171,6 +170,7 @@ class Agent:
         return self._run_execution(self._execution(input, **kwargs))
 
     async def _run_async(self, input: Any, **kwargs: Any) -> AgentResult:
+        import asyncio
         await self._prepare_mcp_clients()
         execution = self._execution(input, **kwargs)
         acomplete = getattr(execution.model, "acomplete", None)
@@ -242,6 +242,7 @@ class Agent:
 
     async def _arun_stream(self, input: Any, **kwargs: Any):
         """Async counterpart of ``run_stream`` for models with native streaming."""
+        import asyncio
         await self._prepare_mcp_clients()
         execution = self._execution(input, **kwargs)
         astream = getattr(execution.model, "astream", None)
@@ -297,6 +298,7 @@ class Agent:
                     yield event
 
     async def _tool_events(self, execution, tool_call, *, streaming):
+        import asyncio
         yield AgentStreamEvent(
             type=AgentStreamEventType.TOOL_CALL_DELTA, tool_call=tool_call
         )
@@ -339,6 +341,7 @@ class Agent:
         )
 
     async def _execute_tool_events(self, execution, calls, *, streaming):
+        import asyncio
         results = {}
 
         def accept(event):
@@ -410,6 +413,7 @@ class Agent:
                 )
 
     async def _prepare_mcp_clients(self) -> None:
+        import asyncio
         tasks = [
             asyncio.create_task(client.connect())
             for client in self.mcp_clients

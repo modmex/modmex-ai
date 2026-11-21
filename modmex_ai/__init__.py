@@ -1,123 +1,126 @@
-"""Lightweight AI flows, agents, tools, and model adapters."""
+"""Lightweight AI flows, agents, tools, and model adapters.
 
-from modmex_ai.context import (
-    ContextCompactor,
-    CompactionResult,
-    CompactionSnapshot,
-    context_bytes,
-)
-from modmex_ai.errors import RunTimeoutError
-from modmex_ai.budget import execution_budget
+Public names are imported lazily (PEP 562): ``from modmex_ai import Agent`` loads
+only the modules ``Agent`` needs, not voice, realtime, MCP, evals, etc. This keeps
+serverless cold starts proportional to what a handler actually uses.
+"""
 
-from modmex_ai.agents import (
-    Agent,
-    AgentResult,
-    AgentStreamEvent,
-    AgentStreamEventType,
-    MCPProgressEvent,
-    Handoff,
-    RECOMMENDED_PROMPT_PREFIX,
-    RunContext,
-    prompt_with_handoff_instructions,
-)
-from modmex_ai.models import (
-    AnthropicSettings,
-    AsyncModelClient,
-    FakeModel,
-    FallbackModel,
-    ModelClient,
-    ModelProfile,
-    ModelRequest,
-    ModelResponse,
-    ModelStreamEvent,
-    ModelStreamEventType,
-    ModelSettings,
-    OpenAISettings,
-    ProviderState,
-    ToolCall,
-    Usage,
-)
-from modmex_ai.messages import (
-    BinaryData,
-    ContentInput,
-    FileInput,
-    ImageInput,
-    InputDetail,
-    Message,
-    TextInput,
-)
-from modmex_ai.sessions import InMemorySession, Session, SessionItem, SessionSnapshot
-from modmex_ai.mcp import (
-    MCPClient,
-    MCPClientConnection,
-    MCPClientManager,
-    RemoteTool,
-    MCPError,
-    MCPInputRequired,
-    MCPHeadersProvider,
-    MCPRequest,
-)
-from modmex_ai.sessions import (
-    DurableSessionStore,
-    InMemoryDurableSessionStore,
-    SessionConflictError,
-)
-from modmex_ai.approvals import (
-    ApprovalDecision,
-    ApprovalDecisionType,
-    ApprovalPolicy,
-    ApprovalRequest,
-)
-from modmex_ai.observability import ObservabilityEvent, ObservabilityObserver
-from modmex_ai.evals import EvalCase, EvalResult, EvalRunner
-from modmex_ai.tools import Tool, ToolExecutor, ToolResult, as_tool, tool
-from modmex_ai.flows import (
-    Flow,
-    FlowContinuation,
-    FlowResult,
-    FlowStreamEvent,
-    FlowStreamEventType,
-    FlowStateConflictError,
-    FlowStateStatus,
-    FlowStateStore,
-    FlowSuspended,
-    FlowSuspension,
-    InMemoryFlowStateStore,
-    PersistedFlowState,
-)
-from modmex_ai.guardrails import (
-    Guardrail,
-    GuardrailResult,
-    InputGuardrail,
-    OutputGuardrail,
-    ToolInputGuardrail,
-    ToolOutputGuardrail,
-)
-from modmex_ai.realtime import RealtimeEvent, RealtimeSession, RealtimeTransport
-from modmex_ai.voice import (
-    ChainedVoiceSession,
-    CallableSpeechToTextProvider,
-    CallableTextToSpeechProvider,
-    LiveSpeechToTextProvider,
-    LiveSpeechToTextSession,
-    SpeechToTextProvider,
-    StreamingSpeechToTextProvider,
-    StreamingTextToSpeechProvider,
-    TextToSpeechProvider,
-    Transcription,
-    VoiceInputEvent,
-    VoiceInputEventType,
-    VoiceAgentSession,
-    VoiceSessionEvent,
-    VoiceSessionEventType,
-    VoiceContinuation,
-    VoiceTerminationReason,
-    VoiceTurnOptions,
-    VoiceTurnMetrics,
-    VoiceTurnOutcome,
-    VoiceTurnReason,
-    VoiceTurnObserver,
-)
+from __future__ import annotations
+
+from importlib import import_module
+from typing import TYPE_CHECKING, Any
+
+_EXPORTS: dict[str, str] = {
+    'ContextCompactor': 'modmex_ai.context',
+    'CompactionResult': 'modmex_ai.context',
+    'CompactionSnapshot': 'modmex_ai.context',
+    'context_bytes': 'modmex_ai.context',
+    'RunTimeoutError': 'modmex_ai.errors',
+    'execution_budget': 'modmex_ai.budget',
+    'Agent': 'modmex_ai.agents',
+    'AgentResult': 'modmex_ai.agents',
+    'AgentStreamEvent': 'modmex_ai.agents',
+    'AgentStreamEventType': 'modmex_ai.agents',
+    'MCPProgressEvent': 'modmex_ai.agents',
+    'Handoff': 'modmex_ai.agents',
+    'RECOMMENDED_PROMPT_PREFIX': 'modmex_ai.agents',
+    'RunContext': 'modmex_ai.agents',
+    'prompt_with_handoff_instructions': 'modmex_ai.agents',
+    'AnthropicSettings': 'modmex_ai.models',
+    'AsyncModelClient': 'modmex_ai.models',
+    'FakeModel': 'modmex_ai.models',
+    'FallbackModel': 'modmex_ai.models',
+    'ModelClient': 'modmex_ai.models',
+    'ModelProfile': 'modmex_ai.models',
+    'ModelRequest': 'modmex_ai.models',
+    'ModelResponse': 'modmex_ai.models',
+    'ModelStreamEvent': 'modmex_ai.models',
+    'ModelStreamEventType': 'modmex_ai.models',
+    'ModelSettings': 'modmex_ai.models',
+    'OpenAISettings': 'modmex_ai.models',
+    'ProviderState': 'modmex_ai.models',
+    'ToolCall': 'modmex_ai.models',
+    'Usage': 'modmex_ai.models',
+    'BinaryData': 'modmex_ai.messages',
+    'ContentInput': 'modmex_ai.messages',
+    'FileInput': 'modmex_ai.messages',
+    'ImageInput': 'modmex_ai.messages',
+    'InputDetail': 'modmex_ai.messages',
+    'Message': 'modmex_ai.messages',
+    'TextInput': 'modmex_ai.messages',
+    'InMemorySession': 'modmex_ai.sessions',
+    'Session': 'modmex_ai.sessions',
+    'SessionItem': 'modmex_ai.sessions',
+    'SessionSnapshot': 'modmex_ai.sessions',
+    'DurableSessionStore': 'modmex_ai.sessions',
+    'InMemoryDurableSessionStore': 'modmex_ai.sessions',
+    'SessionConflictError': 'modmex_ai.sessions',
+    'MCPClient': 'modmex_ai.mcp',
+    'MCPClientConnection': 'modmex_ai.mcp',
+    'MCPClientManager': 'modmex_ai.mcp',
+    'RemoteTool': 'modmex_ai.mcp',
+    'MCPError': 'modmex_ai.mcp',
+    'MCPInputRequired': 'modmex_ai.mcp',
+    'MCPHeadersProvider': 'modmex_ai.mcp',
+    'MCPRequest': 'modmex_ai.mcp',
+    'ApprovalDecision': 'modmex_ai.approvals',
+    'ApprovalDecisionType': 'modmex_ai.approvals',
+    'ApprovalPolicy': 'modmex_ai.approvals',
+    'ApprovalRequest': 'modmex_ai.approvals',
+    'ObservabilityEvent': 'modmex_ai.observability',
+    'ObservabilityObserver': 'modmex_ai.observability',
+    'EvalCase': 'modmex_ai.evals',
+    'EvalResult': 'modmex_ai.evals',
+    'EvalRunner': 'modmex_ai.evals',
+    'Tool': 'modmex_ai.tools',
+    'ToolExecutor': 'modmex_ai.tools',
+    'ToolResult': 'modmex_ai.tools',
+    'as_tool': 'modmex_ai.tools',
+    'tool': 'modmex_ai.tools',
+    'Flow': 'modmex_ai.flows',
+    'FlowContinuation': 'modmex_ai.flows',
+    'FlowResult': 'modmex_ai.flows',
+    'FlowStreamEvent': 'modmex_ai.flows',
+    'FlowStreamEventType': 'modmex_ai.flows',
+    'FlowStateConflictError': 'modmex_ai.flows',
+    'FlowStateStatus': 'modmex_ai.flows',
+    'FlowStateStore': 'modmex_ai.flows',
+    'FlowSuspended': 'modmex_ai.flows',
+    'FlowSuspension': 'modmex_ai.flows',
+    'InMemoryFlowStateStore': 'modmex_ai.flows',
+    'PersistedFlowState': 'modmex_ai.flows',
+    'Guardrail': 'modmex_ai.guardrails',
+    'GuardrailResult': 'modmex_ai.guardrails',
+    'InputGuardrail': 'modmex_ai.guardrails',
+    'OutputGuardrail': 'modmex_ai.guardrails',
+    'ToolInputGuardrail': 'modmex_ai.guardrails',
+    'ToolOutputGuardrail': 'modmex_ai.guardrails',
+    'RealtimeEvent': 'modmex_ai.realtime',
+    'RealtimeSession': 'modmex_ai.realtime',
+    'RealtimeTransport': 'modmex_ai.realtime',
+    'ChainedVoiceSession': 'modmex_ai.voice',
+    'CallableSpeechToTextProvider': 'modmex_ai.voice',
+    'CallableTextToSpeechProvider': 'modmex_ai.voice',
+    'LiveSpeechToTextProvider': 'modmex_ai.voice',
+    'LiveSpeechToTextSession': 'modmex_ai.voice',
+    'SpeechToTextProvider': 'modmex_ai.voice',
+    'StreamingSpeechToTextProvider': 'modmex_ai.voice',
+    'StreamingTextToSpeechProvider': 'modmex_ai.voice',
+    'TextToSpeechProvider': 'modmex_ai.voice',
+    'Transcription': 'modmex_ai.voice',
+    'VoiceInputEvent': 'modmex_ai.voice',
+    'VoiceInputEventType': 'modmex_ai.voice',
+    'VoiceAgentSession': 'modmex_ai.voice',
+    'VoiceSessionEvent': 'modmex_ai.voice',
+    'VoiceSessionEventType': 'modmex_ai.voice',
+    'VoiceContinuation': 'modmex_ai.voice',
+    'VoiceTerminationReason': 'modmex_ai.voice',
+    'VoiceTurnOptions': 'modmex_ai.voice',
+    'VoiceTurnMetrics': 'modmex_ai.voice',
+    'VoiceTurnOutcome': 'modmex_ai.voice',
+    'VoiceTurnReason': 'modmex_ai.voice',
+    'VoiceTurnObserver': 'modmex_ai.voice',
+}
 
 __all__ = [
     "AnthropicSettings",
@@ -228,3 +231,136 @@ __all__ = [
     "prompt_with_handoff_instructions",
     "tool",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    module = _EXPORTS.get(name)
+    if module is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = getattr(import_module(module), name)
+    globals()[name] = value  # cache: later lookups skip __getattr__
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(_EXPORTS))
+
+
+if TYPE_CHECKING:  # static analysis and IDE completion see the real symbols
+    from modmex_ai.context import (
+        ContextCompactor,
+        CompactionResult,
+        CompactionSnapshot,
+        context_bytes,
+    )
+    from modmex_ai.errors import RunTimeoutError
+    from modmex_ai.budget import execution_budget
+    from modmex_ai.agents import (
+        Agent,
+        AgentResult,
+        AgentStreamEvent,
+        AgentStreamEventType,
+        MCPProgressEvent,
+        Handoff,
+        RECOMMENDED_PROMPT_PREFIX,
+        RunContext,
+        prompt_with_handoff_instructions,
+    )
+    from modmex_ai.models import (
+        AnthropicSettings,
+        AsyncModelClient,
+        FakeModel,
+        FallbackModel,
+        ModelClient,
+        ModelProfile,
+        ModelRequest,
+        ModelResponse,
+        ModelStreamEvent,
+        ModelStreamEventType,
+        ModelSettings,
+        OpenAISettings,
+        ProviderState,
+        ToolCall,
+        Usage,
+    )
+    from modmex_ai.messages import (
+        BinaryData,
+        ContentInput,
+        FileInput,
+        ImageInput,
+        InputDetail,
+        Message,
+        TextInput,
+    )
+    from modmex_ai.sessions import InMemorySession, Session, SessionItem, SessionSnapshot
+    from modmex_ai.mcp import (
+        MCPClient,
+        MCPClientConnection,
+        MCPClientManager,
+        RemoteTool,
+        MCPError,
+        MCPInputRequired,
+        MCPHeadersProvider,
+        MCPRequest,
+    )
+    from modmex_ai.sessions import (
+        DurableSessionStore,
+        InMemoryDurableSessionStore,
+        SessionConflictError,
+    )
+    from modmex_ai.approvals import (
+        ApprovalDecision,
+        ApprovalDecisionType,
+        ApprovalPolicy,
+        ApprovalRequest,
+    )
+    from modmex_ai.observability import ObservabilityEvent, ObservabilityObserver
+    from modmex_ai.evals import EvalCase, EvalResult, EvalRunner
+    from modmex_ai.tools import Tool, ToolExecutor, ToolResult, as_tool, tool
+    from modmex_ai.flows import (
+        Flow,
+        FlowContinuation,
+        FlowResult,
+        FlowStreamEvent,
+        FlowStreamEventType,
+        FlowStateConflictError,
+        FlowStateStatus,
+        FlowStateStore,
+        FlowSuspended,
+        FlowSuspension,
+        InMemoryFlowStateStore,
+        PersistedFlowState,
+    )
+    from modmex_ai.guardrails import (
+        Guardrail,
+        GuardrailResult,
+        InputGuardrail,
+        OutputGuardrail,
+        ToolInputGuardrail,
+        ToolOutputGuardrail,
+    )
+    from modmex_ai.realtime import RealtimeEvent, RealtimeSession, RealtimeTransport
+    from modmex_ai.voice import (
+        ChainedVoiceSession,
+        CallableSpeechToTextProvider,
+        CallableTextToSpeechProvider,
+        LiveSpeechToTextProvider,
+        LiveSpeechToTextSession,
+        SpeechToTextProvider,
+        StreamingSpeechToTextProvider,
+        StreamingTextToSpeechProvider,
+        TextToSpeechProvider,
+        Transcription,
+        VoiceInputEvent,
+        VoiceInputEventType,
+        VoiceAgentSession,
+        VoiceSessionEvent,
+        VoiceSessionEventType,
+        VoiceContinuation,
+        VoiceTerminationReason,
+        VoiceTurnOptions,
+        VoiceTurnMetrics,
+        VoiceTurnOutcome,
+        VoiceTurnReason,
+        VoiceTurnObserver,
+    )

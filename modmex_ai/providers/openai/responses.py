@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 
 from modmex_ai.http import AsyncHttpClient, HttpClient, parse_sse_lines, parse_sse_lines_async
 from modmex_ai.models import AsyncModelClient, ModelRequest, ModelResponse
@@ -61,6 +60,7 @@ class OpenAIResponsesModel(AsyncModelClient):
             await self.async_http_client.close()
 
     async def acomplete(self, request: ModelRequest) -> ModelResponse:
+        import asyncio
         if self.async_http_client is None:
             return await asyncio.to_thread(self.complete, request)
         payload = to_responses_payload(request, self.model)
@@ -94,6 +94,7 @@ class OpenAIResponsesModel(AsyncModelClient):
         )
 
     async def astream(self, request: ModelRequest):
+        import asyncio
         payload = to_responses_payload(request, self.model)
         payload["stream"] = True
         if self.async_http_client is not None:

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -43,6 +42,7 @@ def execution_budget(seconds: float | None):
 
 
 async def bounded_await(awaitable):
+    import asyncio
     try:
         remaining = remaining_seconds()
     except RunTimeoutError:
