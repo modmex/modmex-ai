@@ -10,6 +10,8 @@ Checks, in order (stops at the first failure):
                     thinking blocks verbatim (the part only the real API can verify)
   4. stream       - SSE parsing via Agent.run_stream
   5. async        - acomplete (native httpx if installed, else thread)
+  6. tool switch  - tool_selector changes the tool set mid-run; the adapter must
+                    drop the thinking bound to the old set so the API accepts it
 """
 
 from __future__ import annotations
@@ -184,11 +186,46 @@ def main() -> None:
         transport = "httpx" if model.async_http_client is not None else "thread"
         return f"transport={transport} text={response.output_text!r}"
 
+    def tool_switch():
+        tool_calls.clear()
+
+        @tool
+        def pick_city(hint: str) -> dict:
+            """Resolve a city name from a hint."""
+            return {"city": "Paris"}
+
+        phases = {"calls": 0}
+
+        def selector(context, names):
+            phases["calls"] += 1
+            return ["pick_city"] if phases["calls"] == 1 else ["pick_city", "get_weather"]
+
+        recorder = RecordingHttp(model.http_client)
+        agent = Agent(
+            name="switch",
+            instructions="First resolve the city with pick_city, then get its weather.",
+            tools=[pick_city, get_weather],
+            tool_selector=selector,
+            model=AnthropicMessagesModel(MODEL, http_client=recorder),
+            settings=ModelSettings(reasoning_effort="max", max_tokens=16000),
+        )
+        result = agent.run(
+            "Before calling any tool, compute 37 * 43 and use the result as the hint for "
+            "pick_city. Then get that city's weather and answer in one sentence."
+        )
+        assert tool_calls == ["Paris"], f"tool calls: {tool_calls}"
+        sent = [
+            [b.get("type") for m in req["messages"] if m["role"] == "assistant" for b in m["content"]]
+            for req, _ in recorder.exchanges
+        ]
+        return f"requests={len(sent)} assistant blocks sent={sent} output={result.output!r}"
+
     check("complete", complete)
     check("structured", structured)
     check("tool loop", tool_loop)
     check("stream", stream)
     check("async", async_complete)
+    check("tool switch", tool_switch)
     print("all checks passed")
 
 
