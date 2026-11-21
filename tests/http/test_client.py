@@ -448,3 +448,44 @@ def test_http_stream_maps_timeout_url_error_and_non_json_http_error(monkeypatch)
     monkeypatch.setattr("urllib.request.urlopen", lambda *_args, **_kwargs: (_ for _ in ()).throw(urllib.error.URLError("offline")))
     with pytest.raises(ProviderError, match="offline"):
         list(client.post_json_stream("https://example.test"))
+
+
+def test_async_http_client_recreates_owned_transport_on_a_new_event_loop(monkeypatch):
+    import modmex_ai.http.async_client as module
+
+    created = []
+
+    class Response:
+        status_code = 200
+        headers = {}
+        content = b'{"ok":true}'
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"ok": True}
+
+    class FakeAsyncClient:
+        def __init__(self, timeout):
+            created.append(self)
+
+        async def post(self, url, **kwargs):
+            return Response()
+
+        async def aclose(self):
+            pass
+
+    class FakeHttpx:
+        AsyncClient = FakeAsyncClient
+
+    monkeypatch.setattr(module, "_httpx", lambda: FakeHttpx)
+    client = AsyncHttpClient()
+
+    async def call():
+        await client.post_json("https://example.test/a")
+        await client.post_json("https://example.test/b")
+
+    asyncio.run(call())  # invocation 1: one pooled client, reused within the loop
+    asyncio.run(call())  # invocation 2: new loop -> new pooled client
+    assert len(created) == 2

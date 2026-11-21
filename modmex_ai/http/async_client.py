@@ -32,6 +32,7 @@ class AsyncHttpClient:
         self._client = client
         self._owns_client = client is None if own_client is None else own_client
         self._closed = False
+        self._loop: Any = None
 
     @staticmethod
     def is_available() -> bool:
@@ -171,8 +172,20 @@ class AsyncHttpClient:
     async def _get_client(self) -> Any:
         if self._closed:
             raise RuntimeError("Async HTTP client is closed")
+        import asyncio
+
+        loop = asyncio.get_running_loop()
+        if self._client is not None and self._loop is None:
+            self._loop = loop  # an injected client adopts the first loop that uses it
+        if self._client is not None and self._owns_client and self._loop is not loop:
+            # An httpx pool is bound to the loop that created it. Serverless async
+            # handlers usually run each invocation in a new loop (asyncio.run), so
+            # a pooled client from a previous, closed loop fails intermittently
+            # with "Event loop is closed". Its loop is gone; just drop it.
+            self._client = None
         if self._client is None:
             self._client = _httpx().AsyncClient(timeout=self.timeout)
+            self._loop = loop
         return self._client
 
 
