@@ -10,7 +10,12 @@ from typing import Any
 
 from modmex import BaseModel
 
-from modmex_ai.errors import ModelTimeoutError, ProviderError, RateLimitError
+from modmex_ai.errors import (
+    ModelTimeoutError,
+    ProviderConnectionError,
+    ProviderError,
+    RateLimitError,
+)
 from modmex_ai.http.retries import RetryConfig
 from modmex_ai.budget import bounded_timeout, remaining_seconds
 
@@ -182,7 +187,9 @@ class HttpClient:
                 headers=headers,
             ) from exc
         except urllib.error.URLError as exc:
-            raise ProviderError(str(exc)) from exc
+            raise _url_error(exc) from exc
+        except ConnectionError as exc:  # reset/aborted while reading the response
+            raise ProviderConnectionError(str(exc)) from exc
 
     def _stream(
         self,
@@ -207,7 +214,9 @@ class HttpClient:
             except urllib.error.HTTPError as exc:
                 last_error = _provider_error_from_http_error(exc)
             except urllib.error.URLError as exc:
-                last_error = ProviderError(str(exc))
+                last_error = _url_error(exc)
+            except ConnectionError as exc:
+                last_error = ProviderConnectionError(str(exc))
             delay = None if emitted else self.retry.delay(last_error, attempt)
             if delay is None:
                 raise last_error
@@ -215,6 +224,12 @@ class HttpClient:
             remaining_seconds()
         assert last_error is not None
         raise last_error
+
+
+def _url_error(error: urllib.error.URLError) -> ProviderError:
+    if isinstance(error.reason, TimeoutError):
+        return ModelTimeoutError("Model request timed out")
+    return ProviderConnectionError(str(error))
 
 
 def _multipart_body(

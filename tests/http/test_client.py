@@ -135,14 +135,50 @@ def test_http_client_maps_http_error_with_text_body(monkeypatch):
     assert exc.value.response_body == "not-json"
 
 
-def test_http_client_maps_url_error(monkeypatch):
+def test_http_client_retries_connection_errors(monkeypatch):
+    from modmex_ai.errors import ProviderConnectionError
+    from modmex_ai.http import RetryConfig
+
+    attempts = []
+
     def urlopen(_request, timeout):
+        attempts.append(1)
         raise urllib.error.URLError("no route")
 
     monkeypatch.setattr("urllib.request.urlopen", urlopen)
 
-    with pytest.raises(ProviderError):
-        HttpClient().post_json("https://example.test")
+    with pytest.raises(ProviderConnectionError):
+        HttpClient(retry=RetryConfig(attempts=2, backoff_seconds=0)).post_json("https://example.test")
+    assert len(attempts) == 3
+
+
+def test_http_client_does_not_retry_connect_timeouts(monkeypatch):
+    from modmex_ai.errors import ModelTimeoutError
+    from modmex_ai.http import RetryConfig
+
+    attempts = []
+
+    def urlopen(_request, timeout):
+        attempts.append(1)
+        raise urllib.error.URLError(TimeoutError("timed out"))
+
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+
+    with pytest.raises(ModelTimeoutError):
+        HttpClient(retry=RetryConfig(attempts=2, backoff_seconds=0)).post_json("https://example.test")
+    assert len(attempts) == 1
+
+
+def test_http_client_retries_reset_while_reading(monkeypatch):
+    from modmex_ai.errors import ProviderConnectionError
+    from modmex_ai.http import RetryConfig
+
+    def urlopen(_request, timeout):
+        raise ConnectionResetError(54, "Connection reset by peer")
+
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    with pytest.raises(ProviderConnectionError):
+        HttpClient(retry=RetryConfig(attempts=1, backoff_seconds=0)).post_json("https://example.test")
 
 
 def test_http_client_builds_multipart_requests(monkeypatch):

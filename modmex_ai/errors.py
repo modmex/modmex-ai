@@ -23,6 +23,13 @@ class RateLimitError(ProviderError):
     pass
 
 
+class ProviderConnectionError(ProviderError):
+    """The request never got an HTTP response (connection reset, DNS, TLS...).
+
+    Transient by nature, so the default retry policy retries it.
+    """
+
+
 class ModelRefusalError(ProviderError):
     """The model declined the request (e.g. Anthropic ``stop_reason: refusal``)."""
 

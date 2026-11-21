@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Callable
 
-from modmex_ai.errors import ProviderError
+from modmex_ai.errors import ProviderConnectionError, ProviderError
 from modmex_ai.budget import remaining_seconds
 
 
@@ -46,7 +46,11 @@ class RetryConfig:
             for key in ("code", "type")
         ):
             return None
-        if error.status_code not in self.status_codes or attempt >= self.attempts:
+        retryable = (
+            isinstance(error, ProviderConnectionError)
+            or error.status_code in self.status_codes
+        )
+        if not retryable or attempt >= self.attempts:
             return None
         delay = self.backoff_seconds * (2**attempt)
         value = next(

@@ -6,6 +6,7 @@ from typing import Any
 
 from modmex_ai.errors import (
     ModelTimeoutError,
+    ProviderConnectionError,
     ProviderError,
     RateLimitError,
     RunTimeoutError,
@@ -198,4 +199,6 @@ def _provider_error(error: Exception) -> ProviderError:
             response_body=body,
             headers=dict(response.headers),
         )
+    if isinstance(error, (httpx.TransportError, ConnectionError)):
+        return ProviderConnectionError(str(error) or type(error).__name__)
     return ProviderError(str(error))
