@@ -15,6 +15,7 @@ _EXPORTS: dict[str, str] = {
     'CompactionResult': 'modmex_ai.context',
     'CompactionSnapshot': 'modmex_ai.context',
     'context_bytes': 'modmex_ai.context',
+    'TokenEstimator': 'modmex_ai.context',
     'RunTimeoutError': 'modmex_ai.errors',
     'execution_budget': 'modmex_ai.budget',
     'Agent': 'modmex_ai.agents',
@@ -129,6 +130,7 @@ __all__ = [
     "CompactionResult",
     "CompactionSnapshot",
     "context_bytes",
+    "TokenEstimator",
     "RunTimeoutError",
     "execution_budget",
     "Agent",
@@ -252,6 +254,7 @@ if TYPE_CHECKING:  # static analysis and IDE completion see the real symbols
         CompactionResult,
         CompactionSnapshot,
         context_bytes,
+        TokenEstimator,
     )
     from modmex_ai.errors import RunTimeoutError
     from modmex_ai.budget import execution_budget

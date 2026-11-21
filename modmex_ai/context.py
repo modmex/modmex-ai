@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
+import math
 from dataclasses import field
 from time import perf_counter
 from typing import Callable, Literal
@@ -42,6 +42,80 @@ class CompactionResult(BaseModel):
 def context_bytes(items: list[HistoryItem]) -> int:
     """UTF-8 serialized bytes, explicitly not a token estimate."""
     return len(dumps(items).encode("utf-8"))
+
+
+class TokenEstimator:
+    """Estimate tokens from bytes, calibrated with the provider's own usage.
+
+    Use it as ``ContextCompactor(measure=estimator, threshold=<tokens>, ...)``.
+    Until it has observed a response it assumes ``bytes_per_token`` (default 4,
+    a common ratio for English/Spanish prose); after each run, feed it the run's
+    trace with ``observe_trace`` and it learns the real ratio from what the
+    provider reported for every model request. No tokenizer dependency and no
+    extra API calls. Persist ``bytes_per_token`` if you want warm values to
+    survive a cold start.
+
+    Within one ``compact`` call the ratio is fixed, so the measure stays
+    deterministic and monotonic as the compactor requires.
+    """
+
+    # Samples outside this range are not real per-request ratios: e.g. with
+    # server-side conversation state only new messages are sent but the whole
+    # conversation is billed. They are ignored.
+    MIN_BYTES_PER_TOKEN = 1.0
+    MAX_BYTES_PER_TOKEN = 12.0
+
+    def __init__(self, *, bytes_per_token: float = 4.0, window: int = 20) -> None:
+        if not self.MIN_BYTES_PER_TOKEN <= bytes_per_token <= self.MAX_BYTES_PER_TOKEN:
+            raise ValueError("bytes_per_token must be between 1 and 12")
+        if not isinstance(window, int) or isinstance(window, bool) or window <= 0:
+            raise ValueError("window must be a positive integer")
+        self._default = float(bytes_per_token)
+        self._window = window
+        self._samples: list[tuple[int, int]] = []
+
+    @property
+    def bytes_per_token(self) -> float:
+        if not self._samples:
+            return self._default
+        total_bytes = sum(sent for sent, _ in self._samples)
+        total_tokens = sum(tokens for _, tokens in self._samples)
+        return total_bytes / total_tokens
+
+    @property
+    def calibrated(self) -> bool:
+        return bool(self._samples)
+
+    def __call__(self, items: list[HistoryItem]) -> int:
+        return math.ceil(context_bytes(items) / self.bytes_per_token)
+
+    def observe(self, *, sent_bytes: int, input_tokens: int) -> bool:
+        """Record one request: bytes sent vs. input tokens billed. Returns whether it was used."""
+        if sent_bytes <= 0 or input_tokens <= 0:
+            return False
+        ratio = sent_bytes / input_tokens
+        if not self.MIN_BYTES_PER_TOKEN <= ratio <= self.MAX_BYTES_PER_TOKEN:
+            return False
+        self._samples.append((sent_bytes, input_tokens))
+        del self._samples[: -self._window]
+        return True
+
+    def observe_trace(self, trace: Trace) -> int:
+        """Learn from every completed model request in a run's trace. Returns samples used."""
+        pending: dict[str, int] = {}
+        used = 0
+        for step in trace.steps:
+            if step.type == "model_request":
+                pending[step.name] = int(step.data.get("context_bytes") or 0) + int(
+                    step.data.get("tool_schema_bytes") or 0
+                )
+            elif step.type == "model_error":
+                pending.pop(step.name, None)
+            elif step.type == "model_response" and step.name in pending:
+                usage = step.data.get("usage")
+                tokens = getattr(usage, "input_tokens", 0) if usage is not None else 0
+                used += self.observe(sent_bytes=pending.pop(step.name), input_tokens=tokens)
+        return used
 
 
 def _digest(items):
@@ -150,6 +224,8 @@ class ContextCompactor:
         previous: CompactionSnapshot | None = None,
         trace: Trace | None = None,
     ) -> CompactionResult:
+        import asyncio
+
         result, request, end = self._prepare(history, previous)
         if request is None:
             return result

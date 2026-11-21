@@ -542,6 +542,36 @@ with execution_budget(25):  # Shared budget for compaction AND the ensuing agent
     response = await agent.run_async(result.messages)
 ```
 
+### Measuring in tokens without a tokenizer
+
+The default measure is serialized bytes. To budget in tokens without adding a
+tokenizer dependency or extra API calls, use `TokenEstimator`: it starts at ~4 bytes
+per token and calibrates itself from the input tokens your provider actually billed
+for each request in a run's trace.
+
+```python
+from modmex_ai import ContextCompactor, ModelSettings, TokenEstimator
+
+estimator = TokenEstimator()  # optionally TokenEstimator(bytes_per_token=saved_value)
+compactor = ContextCompactor(
+    model=summary_model,
+    measure=estimator,
+    threshold=60_000,         # tokens
+    max_input_size=80_000,    # tokens sent to the summarizer per batch
+    keep_recent_turns=4,
+    settings=ModelSettings(max_tokens=4000, reasoning_effort="low"),
+)
+
+result = compactor.compact(full_history, previous=saved_snapshot)
+response = agent.run(result.messages)
+estimator.observe_trace(response.trace)   # learn the real bytes/token ratio
+saved_value = estimator.bytes_per_token    # persist to keep it across cold starts
+```
+
+Samples that cannot be a real per-request ratio (for example server-side conversation
+state, where only new messages are sent but the whole conversation is billed) are
+ignored. The ratio is fixed during a `compact` call, so the measure stays deterministic.
+
 Pass the full, append-only history every time, together with the last successful
 CompactionSnapshot (serializable with model_dump()). The snapshot stores summary,
 covered item count and a digest of the covered prefix. Changed/truncated history or a

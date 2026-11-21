@@ -342,3 +342,52 @@ def test_compacted_tool_history_is_valid_anthropic_payload():
     uses = {block["id"] for block in blocks if block["type"] == "tool_use"}
     results = {block["tool_use_id"] for block in blocks if block["type"] == "tool_result"}
     assert uses and uses == results
+
+
+from modmex_ai import Agent, TokenEstimator
+
+
+def test_token_estimator_defaults_to_four_bytes_per_token():
+    estimator = TokenEstimator()
+    items = [Message(role="user", content="x" * 100)]
+    assert not estimator.calibrated
+    assert estimator(items) == -(-context_bytes(items) // 4)
+
+
+def test_token_estimator_learns_from_observations_and_ignores_outliers():
+    estimator = TokenEstimator(window=2)
+    assert estimator.observe(sent_bytes=3000, input_tokens=1000)  # 3 bytes/token
+    assert not estimator.observe(sent_bytes=100, input_tokens=5000)  # remote state: billed > sent
+    assert not estimator.observe(sent_bytes=0, input_tokens=10)
+    assert estimator.bytes_per_token == 3.0
+    estimator.observe(sent_bytes=5000, input_tokens=1000)
+    estimator.observe(sent_bytes=5000, input_tokens=1000)  # window keeps the last 2
+    assert estimator.bytes_per_token == 5.0
+    with pytest.raises(ValueError):
+        TokenEstimator(bytes_per_token=0.5)
+
+
+def test_token_estimator_calibrates_from_agent_trace():
+    model = FakeModel([ModelResponse(output_text="hola", usage=Usage(input_tokens=50, output_tokens=2, total_tokens=52))])
+    result = Agent(name="a", instructions="Be brief.", model=model).run("hola " * 40)
+    estimator = TokenEstimator()
+
+    assert estimator.observe_trace(result.trace) == 1
+    request = next(step for step in result.trace.steps if step.type == "model_request")
+    sent = request.data["context_bytes"] + request.data["tool_schema_bytes"]
+    assert estimator.bytes_per_token == sent / 50
+
+
+def test_compactor_uses_token_estimator_as_measure():
+    estimator = TokenEstimator(bytes_per_token=4.0)
+    original = history()
+    tokens = estimator(original)
+    model = FakeModel([ModelResponse(output_text="Earlier turns summarized.")])
+    compactor_ = ContextCompactor(
+        model=model, measure=estimator, threshold=tokens - 1, keep_recent_turns=2, max_input_size=tokens * 2
+    )
+    result = compactor_.compact(original)
+    assert result.status == "compacted"
+    assert result.before_size == tokens and result.after_size < tokens
+    # Same history, above threshold in bytes but below in tokens: unchanged.
+    assert ContextCompactor(model=model, measure=estimator, threshold=tokens + 1).compact(original).status == "unchanged"
