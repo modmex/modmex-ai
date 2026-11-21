@@ -38,3 +38,16 @@ MODMEX_AI_RUN_LIVE=1 ANTHROPIC_API_KEY=... poetry run python .examples/anthropic
 ```
 
 `ANTHROPIC_MODEL` overrides the model (default `claude-opus-5-5`).
+
+## Voice: Claude + OpenAI STT/TTS
+
+`voice/claude_openai.py` runs one chained voice turn end to end: a spoken Spanish
+question (generated with OpenAI TTS) → OpenAI STT → a Claude agent with a tool →
+OpenAI TTS spoken sentence by sentence. It repeats the turn with
+`speak_while_generating=False` and prints the time-to-first-audio difference.
+Both replies are written to `.examples/output/` (ignored by git) so you can listen.
+
+```bash
+MODMEX_AI_RUN_LIVE=1 OPENAI_API_KEY=... ANTHROPIC_API_KEY=... \
+    poetry run python .examples/voice/claude_openai.py
+```

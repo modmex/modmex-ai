@@ -127,3 +127,29 @@ class CallableTextToSpeechProvider(TextToSpeechProvider):
     async def synthesize(self, text: str, *, context: RunContext) -> bytes:
         result = self._synthesize(text, context)
         return await result if inspect.isawaitable(result) else result
+
+
+class BufferedStreamingSpeechToText(StreamingSpeechToTextProvider):
+    """Use a request-based STT provider where a streaming one is required.
+
+    Collects the turn's audio chunks and transcribes them once the stream ends,
+    yielding a single final transcript. It adds no partial transcripts, but lets
+    ``ChainedVoiceSession.process_audio_stream`` (and its sentence-by-sentence
+    speech) work with any ``SpeechToTextProvider``.
+    """
+
+    def __init__(self, provider: SpeechToTextProvider) -> None:
+        self.provider = provider
+
+    async def transcribe(self, audio: bytes, *, context: RunContext) -> str:
+        return await self.provider.transcribe(audio, context=context)
+
+    async def transcribe_stream(
+        self,
+        audio: AsyncIterator[bytes],
+        *,
+        context: RunContext,
+    ) -> AsyncIterator[Transcription]:
+        chunks = [chunk async for chunk in audio]
+        text = await self.provider.transcribe(b"".join(chunks), context=context)
+        yield Transcription(text=text, is_final=True)

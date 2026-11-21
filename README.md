@@ -361,6 +361,11 @@ spoken early, since their text is not speakable or could still be rejected; thei
 final reply is synthesized when the turn completes, as before. Turn off with
 `VoiceTurnOptions(speak_while_generating=False)`.
 `VoiceTurnMetrics.first_audio_latency_ms` reports time to the first audio chunk.
+Each sentence is a separate TTS request, so use a raw, concatenable audio format
+for playback (e.g. `OpenAISpeechProvider(response_format="pcm")`); container
+formats such as WAV or MP3 repeat their header per sentence. To use a
+request-based STT such as `OpenAITranscriptionProvider` here, wrap it in
+`BufferedStreamingSpeechToText`.
 A turn cancelled mid-reply is not saved to the session.
 
 Claude has no speech-to-speech, STT or TTS API; use it as the reasoning step of a

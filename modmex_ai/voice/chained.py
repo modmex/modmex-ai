@@ -249,7 +249,10 @@ class ChainedVoiceSession(VoiceAgentSession):
         self._finish_turn(VoiceTurnReason.COMPLETED)
 
     async def _process_audio_stream(self, audio: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
+        from time import perf_counter
+
         self._turn_stage = "stt"
+        stt_started = perf_counter()
         final_transcript: str | None = None
         async for transcription in self.speech_to_text.transcribe_stream(audio, context=self.context):
             self._raise_if_turn_cancelled()
@@ -263,6 +266,7 @@ class ChainedVoiceSession(VoiceAgentSession):
                 final_transcript = transcription.text
         if final_transcript is None:
             raise ValueError("Streaming transcription ended without a final transcript")
+        self._turn_metrics.stt_latency_ms = int((perf_counter() - stt_started) * 1000)
         if self._can_speak_while_generating():
             async for chunk in self._speak_while_generating(final_transcript):
                 yield chunk
@@ -276,10 +280,7 @@ class ChainedVoiceSession(VoiceAgentSession):
             type=VoiceSessionEventType.ASSISTANT_TRANSCRIPT_FINAL,
             data={"transcript": response_text},
         ))
-        self._turn_stage = "tts"
-        async for chunk in self.text_to_speech.synthesize_stream(response_text, context=self.context):
-            self._raise_if_turn_cancelled()
-            self._mark_first_audio()
+        async for chunk in self._synthesize_segment(response_text):
             yield chunk
         await self._emit(VoiceSessionEvent(
             type=VoiceSessionEventType.RESPONSE_COMPLETED,

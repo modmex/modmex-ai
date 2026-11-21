@@ -703,3 +703,22 @@ def test_speak_while_generating_can_be_disabled():
         assert tts.texts == ["Una. Dos."]
 
     asyncio.run(run())
+
+
+def test_buffered_streaming_stt_adapts_a_request_based_provider():
+    from modmex_ai.voice import BufferedStreamingSpeechToText
+
+    class RequestStt(FakeSpeechToText):
+        async def transcribe(self, audio, *, context):
+            return f"heard {audio.decode()}"
+
+    async def chunks():
+        yield b"ab"
+        yield b"cd"
+
+    async def run():
+        stt = BufferedStreamingSpeechToText(RequestStt())
+        return [t async for t in stt.transcribe_stream(chunks(), context=None)]
+
+    result = asyncio.run(run())
+    assert [(t.text, t.is_final) for t in result] == [("heard abcd", True)]
