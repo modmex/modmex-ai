@@ -187,55 +187,15 @@ class Flow:
         metadata: dict[str, Any] | None = None,
     ) -> FlowResult:
         """Execute the suspended tool once, then continue from the saved checkpoint."""
-        suspension = self._require_suspension(state)
-        if decision.request_id != suspension.approval_request.request_id:
-            raise ValueError(
-                "Approval decision does not match the suspended tool call."
-            )
-        agent = self._agent(suspension.active_agent_name)
-        run_context = RunContext(
-            input=None, context=context, metadata=metadata or {}, trace=Trace()
+        agent, suspension, run_context = self._prepare_resume(
+            state, decision, approval_policy=approval_policy, context=context, metadata=metadata
         )
-        if agent.tool_selector is not None:
-            names = [tool.name for tool in agent.tools] + [
-                handoff.name for handoff in agent.handoffs
-            ]
-            selected = agent.tool_selector(run_context, list(names))
-            if not isinstance(selected, (list, tuple)) or any(
-                not isinstance(name, str) for name in selected
-            ):
-                raise ValueError("tool_selector must return registered tool names")
-            if len(set(selected)) != len(selected) or not set(selected).issubset(names):
-                raise ValueError(
-                    "tool_selector returned duplicate or unregistered names"
-                )
-            if suspension.pending_tool_call.name not in selected:
-                raise ValueError("Suspended tool is no longer available")
-        run_context.state["approval_policy"] = approval_policy
-        run_context.state["approval_decisions"] = {decision.request_id: decision}
-        result = ToolExecutor(
-            agent.tools, error_policy=agent.tool_error_policy
-        ).execute(suspension.pending_tool_call, context=run_context)
-        output_item = SessionItem(
-            type="function_call_output",
-            tool_call_id=result.tool_call_id,
-            name=result.name,
-            output=result.output,
+        result = ToolExecutor(agent.tools, error_policy=agent.tool_error_policy).execute(
+            suspension.pending_tool_call, context=run_context
         )
-        session = self._session_for_state(state)
         return self.run(
-            [*suspension.pending_items, output_item]
-            if suspension.provider_state and suspension.provider_state.has_remote_state
-            else [output_item],
-            starting_agent=agent.name,
-            context=context,
-            metadata=metadata,
-            session=session,
-            provider_state=suspension.provider_state,
-            flow_instance_id=state.flow_instance_id,
-            idempotency_key=state.idempotency_key,
-            state_metadata=state.metadata,
-            ttl=state.ttl,
+            self._resume_input(suspension, result),
+            **self._resume_options(state, agent, context=context, metadata=metadata),
         )
 
     async def resume_async(
@@ -248,11 +208,29 @@ class Flow:
         metadata: dict[str, Any] | None = None,
     ) -> FlowResult:
         """Async counterpart of :meth:`resume` for async tools and model clients."""
+        agent, suspension, run_context = self._prepare_resume(
+            state, decision, approval_policy=approval_policy, context=context, metadata=metadata
+        )
+        result = await ToolExecutor(
+            agent.tools, error_policy=agent.tool_error_policy
+        ).execute_async(suspension.pending_tool_call, context=run_context)
+        return await self.run_async(
+            self._resume_input(suspension, result),
+            **self._resume_options(state, agent, context=context, metadata=metadata),
+        )
+
+    def _prepare_resume(
+        self,
+        state: PersistedFlowState,
+        decision: ApprovalDecision,
+        *,
+        approval_policy: ApprovalPolicy,
+        context: Any,
+        metadata: dict[str, Any] | None,
+    ) -> tuple[Agent, FlowSuspension, RunContext]:
         suspension = self._require_suspension(state)
         if decision.request_id != suspension.approval_request.request_id:
-            raise ValueError(
-                "Approval decision does not match the suspended tool call."
-            )
+            raise ValueError("Approval decision does not match the suspended tool call.")
         agent = self._agent(suspension.active_agent_name)
         run_context = RunContext(
             input=None, context=context, metadata=metadata or {}, trace=Trace()
@@ -267,37 +245,46 @@ class Flow:
             ):
                 raise ValueError("tool_selector must return registered tool names")
             if len(set(selected)) != len(selected) or not set(selected).issubset(names):
-                raise ValueError(
-                    "tool_selector returned duplicate or unregistered names"
-                )
+                raise ValueError("tool_selector returned duplicate or unregistered names")
             if suspension.pending_tool_call.name not in selected:
                 raise ValueError("Suspended tool is no longer available")
         run_context.state["approval_policy"] = approval_policy
         run_context.state["approval_decisions"] = {decision.request_id: decision}
-        result = await ToolExecutor(
-            agent.tools, error_policy=agent.tool_error_policy
-        ).execute_async(suspension.pending_tool_call, context=run_context)
+        return agent, suspension, run_context
+
+    @staticmethod
+    def _resume_input(suspension: FlowSuspension, result: Any) -> list[SessionItem]:
         output_item = SessionItem(
             type="function_call_output",
             tool_call_id=result.tool_call_id,
             name=result.name,
             output=result.output,
         )
-        session = self._session_for_state(state)
-        return await self.run_async(
-            [*suspension.pending_items, output_item]
-            if suspension.provider_state and suspension.provider_state.has_remote_state
-            else [output_item],
-            starting_agent=agent.name,
-            context=context,
-            metadata=metadata,
-            session=session,
-            provider_state=suspension.provider_state,
-            flow_instance_id=state.flow_instance_id,
-            idempotency_key=state.idempotency_key,
-            state_metadata=state.metadata,
-            ttl=state.ttl,
-        )
+        if suspension.provider_state and suspension.provider_state.has_remote_state:
+            return [*suspension.pending_items, output_item]
+        return [output_item]
+
+    def _resume_options(
+        self,
+        state: PersistedFlowState,
+        agent: Agent,
+        *,
+        context: Any,
+        metadata: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        suspension = state.suspension
+        assert suspension is not None
+        return {
+            "starting_agent": agent.name,
+            "context": context,
+            "metadata": metadata,
+            "session": self._session_for_state(state),
+            "provider_state": suspension.provider_state,
+            "flow_instance_id": state.flow_instance_id,
+            "idempotency_key": state.idempotency_key,
+            "state_metadata": state.metadata,
+            "ttl": state.ttl,
+        }
 
     @staticmethod
     def completed_state(
