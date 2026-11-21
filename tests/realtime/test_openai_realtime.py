@@ -112,7 +112,7 @@ def test_openai_realtime_executes_function_call_and_continues_response():
             "call_id": "call_1",
             "name": "lookup_order",
             "arguments": '{"order_number":"A-100"}',
-        }])
+        }, {"type": "response.done", "response": {}}])
         session = OpenAIRealtimeSession(
             agent=Agent(
                 name="orders",
@@ -122,6 +122,8 @@ def test_openai_realtime_executes_function_call_and_continues_response():
             transport=transport,
         )
 
+        await session.handle(await session.receive())
+        assert [event["type"] for event in transport.sent] == ["conversation.item.create"]
         await session.handle(await session.receive())
 
         assert transport.sent == [
@@ -140,6 +142,8 @@ def test_openai_realtime_executes_function_call_and_continues_response():
             "tool_execution",
             "realtime_tool_call",
             "realtime_client_event",
+            "realtime_server_event",
+            "realtime_response",
             "realtime_client_event",
         ]
 
@@ -153,7 +157,7 @@ def test_openai_realtime_switches_the_active_agent_after_a_handoff():
             "call_id": "call_1",
             "name": "transfer_to_billing",
             "arguments": "{}",
-        }])
+        }, {"type": "response.done", "response": {}}])
         billing = Agent(name="billing", instructions="Handle billing questions.")
         triage = Agent(
             name="triage",
@@ -172,6 +176,7 @@ def test_openai_realtime_switches_the_active_agent_after_a_handoff():
         )
         assert "strict" not in initial_payload["tools"][0]
 
+        await session.handle(await session.receive())
         await session.handle(await session.receive())
 
         assert session.current_agent is billing
@@ -394,6 +399,7 @@ def test_openai_realtime_integrates_tool_handoff_and_remote_close_in_one_session
                 "name": "transfer_to_dispatch",
                 "arguments": "{}",
             },
+            {"type": "response.done", "response": {}},
             {"type": "session.ended"},
         ])
         dispatch = Agent(name="dispatch", instructions="Handle the load.")
@@ -418,6 +424,7 @@ def test_openai_realtime_integrates_tool_handoff_and_remote_close_in_one_session
         assert [event.type for event in events] == [
             VoiceSessionEventType.TOOL_FINISHED,
             VoiceSessionEventType.HANDOFF_COMPLETED,
+            VoiceSessionEventType.RESPONSE_COMPLETED,
             VoiceSessionEventType.SESSION_ENDED,
         ]
         assert events[-1].data == {"reason": VoiceTerminationReason.ENDED_BY_CALLER}
@@ -431,7 +438,6 @@ def test_openai_realtime_integrates_tool_handoff_and_remote_close_in_one_session
                     "output": '{"origin":"Dallas","available":true}',
                 },
             },
-            {"type": "response.create", "response": {}},
             {
                 "type": "session.update",
                 "session": {
@@ -548,5 +554,27 @@ def test_realtime_normalizes_unknown_handoff_and_ignores_malformed_function_outp
         event = type("Event", (), {"type": "response.function_call_arguments.done", "data": {"call_id": "h", "name": "transfer_to_missing", "arguments": "{}"}, "raw": {}})()
         with pytest.raises(Exception, match="unknown agent"):
             await session.handle(event)
+
+    asyncio.run(run())
+
+
+def test_openai_realtime_tool_failure_respects_return_error_policy():
+    def flaky(order: str):
+        raise RuntimeError("backend down")
+
+    async def run():
+        transport = FakeRealtimeTransport([
+            {"type": "response.function_call_arguments.done", "call_id": "c1", "name": "flaky", "arguments": '{"order":"A"}'},
+            {"type": "response.done", "response": {}},
+        ])
+        session = OpenAIRealtimeSession(
+            agent=Agent(name="a", instructions="x", tools=[flaky], tool_error_policy="return_error"),
+            transport=transport,
+        )
+        await session.handle(await session.receive())  # must not end the call
+        await session.handle(await session.receive())
+        assert transport.sent[0]["item"]["call_id"] == "c1"
+        assert '"ok":false' in transport.sent[0]["item"]["output"]
+        assert transport.sent[1] == {"type": "response.create", "response": {}}
 
     asyncio.run(run())

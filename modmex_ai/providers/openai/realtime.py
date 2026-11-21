@@ -136,6 +136,10 @@ class OpenAIRealtimeSession(RealtimeSession):
         self._handled_tool_call_ids: set[str] = set()
         self._voice_event_queue: list[VoiceSessionEvent] = []
         self._termination_reason: VoiceTerminationReason | None = None
+        # Tool outputs submitted during the current response; the follow-up
+        # response is requested once that response is done (one per batch of
+        # parallel calls, never while a response is still active).
+        self._continue_after_response = False
 
     async def configure(self) -> None:
         """Publish the active agent's instructions and tool surface."""
@@ -223,6 +227,9 @@ class OpenAIRealtimeSession(RealtimeSession):
             response = event.data.get("response", {})
             self.usage.add(_usage_from_response(response))
             self.context.trace.add("realtime_response", self.current_agent.name)
+            if self._continue_after_response:
+                self._continue_after_response = False
+                await self.create_response()
 
     def _session_payload(self) -> dict[str, Any]:
         return self.config.to_session_update(
@@ -275,7 +282,12 @@ class OpenAIRealtimeSession(RealtimeSession):
             await self.configure()
             output: Any = {"transferred": True, "handoff_input": handoff_input}
         else:
-            result = await ToolExecutor(self.current_agent.tools).execute_async(
+            # Honour the agent's policy: with "return_error" a failing tool is
+            # reported to the model instead of ending the live call.
+            result = await ToolExecutor(
+                self.current_agent.tools,
+                error_policy=self.current_agent.tool_error_policy,
+            ).execute_async(
                 tool_call,
                 context=self.context,
             )
@@ -300,7 +312,7 @@ class OpenAIRealtimeSession(RealtimeSession):
                 "output": dumps(output),
             },
         })
-        await self.create_response()
+        self._continue_after_response = True
 
     def _voice_event_from(self, event: RealtimeEvent) -> VoiceSessionEvent | None:
         event_type = event.type
