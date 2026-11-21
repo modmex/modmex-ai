@@ -90,6 +90,7 @@ def from_responses_payload(
         compaction_count=sum(
             1 for item in payload.get("output", []) if item.get("type") == "compaction"
         ),
+        stop_reason=_responses_stop_reason(payload, tool_calls),
     )
 
 
@@ -151,7 +152,30 @@ def from_chat_payload(
         headers=headers,
         provider="openai",
         model=model,
+        stop_reason=_CHAT_STOP_REASONS.get(choice.get("finish_reason"), choice.get("finish_reason")),
     )
+
+
+# Provider-neutral stop reasons (the Anthropic vocabulary) for OpenAI values.
+_CHAT_STOP_REASONS = {
+    "stop": "end_turn",
+    "length": "max_tokens",
+    "tool_calls": "tool_use",
+    "function_call": "tool_use",
+    "content_filter": "refusal",
+}
+
+
+def _responses_stop_reason(payload: dict[str, Any], tool_calls: list[ToolCall]) -> str | None:
+    status = payload.get("status")
+    if status == "incomplete":
+        reason = (payload.get("incomplete_details") or {}).get("reason")
+        return {"max_output_tokens": "max_tokens", "content_filter": "refusal"}.get(
+            reason, reason
+        )
+    if status == "completed":
+        return "tool_use" if tool_calls else "end_turn"
+    return None
 
 
 class _ChatStreamAccumulator:
@@ -164,11 +188,13 @@ class _ChatStreamAccumulator:
         self.text_parts: list[str] = []
         self.calls: dict[int, dict[str, str]] = {}
         self.raw_payloads: list[dict[str, Any]] = []
+        self.finish_reason: str | None = None
 
     def feed(self, payload: dict[str, Any]) -> list[ModelStreamEvent]:
         self.raw_payloads.append(payload)
         events: list[ModelStreamEvent] = []
         choice = (payload.get("choices") or [{}])[0]
+        self.finish_reason = choice.get("finish_reason") or self.finish_reason
         delta = choice.get("delta") or {}
         content = delta.get("content")
         if isinstance(content, str) and content:
@@ -207,6 +233,7 @@ class _ChatStreamAccumulator:
                 status_code=self.status_code,
                 provider="openai",
                 model=self.model,
+                stop_reason=_CHAT_STOP_REASONS.get(self.finish_reason, self.finish_reason),
             )
         )
 

@@ -668,7 +668,7 @@ Use conservative selection, since changing the schema prefix can reduce cache re
 Tool schemas are built once per execution, not fetched/rebuilt on every inference.
 
 `Agent.parallel_tool_calls` controls local async concurrency (default False).
-`ModelSettings.parallel_tool_calls` independently controls whether OpenAI may propose
+`ModelSettings.parallel_tool_calls` independently controls whether the model may propose
 parallel calls (omitted by default). Neither flag proves tool independence; only enable
 local parallelism when the host knows those operations can safely overlap.
 
