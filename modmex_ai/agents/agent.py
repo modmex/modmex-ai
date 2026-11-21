@@ -425,17 +425,7 @@ class Agent:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
-        for client in self.mcp_clients:
-            attached = self._mcp_tool_names.setdefault(id(client), set())
-            for remote_tool in client.tools:
-                if remote_tool.name in attached:
-                    continue
-                if any(tool.name == remote_tool.name for tool in self.tools):
-                    raise ValueError(
-                        f"Duplicate tool name from MCP client: {remote_tool.name}"
-                    )
-                self.tools.append(remote_tool)
-                attached.add(remote_tool.name)
+        self._sync_mcp_tools()
 
     def _ensure_mcp_clients_connected(self) -> None:
         for client in self.mcp_clients:
@@ -444,16 +434,35 @@ class Agent:
                     "Synchronous Agent execution requires connected MCP clients; "
                     "use await agent.run_async(...) or await client.connect() first"
                 )
+        self._sync_mcp_tools()
+
+    def _sync_mcp_tools(self) -> None:
+        """Mirror each connected MCP client's current catalog into ``self.tools``.
+
+        Tools a server no longer lists are removed, and refreshed definitions
+        replace stale ones, so the model is never offered a tool that is gone.
+        """
+        for client in self.mcp_clients:
             attached = self._mcp_tool_names.setdefault(id(client), set())
-            for remote_tool in client.tools:
-                if remote_tool.name in attached:
-                    continue
-                if any(tool.name == remote_tool.name for tool in self.tools):
-                    raise ValueError(
-                        f"Duplicate tool name from MCP client: {remote_tool.name}"
-                    )
-                self.tools.append(remote_tool)
-                attached.add(remote_tool.name)
+            current = {tool.name: tool for tool in client.tools}
+            self.tools = [
+                tool
+                for tool in self.tools
+                if not (tool.name in attached and tool.name not in current)
+            ]
+            for name, remote_tool in current.items():
+                existing = next(
+                    (index for index, tool in enumerate(self.tools) if tool.name == name),
+                    None,
+                )
+                if existing is None:
+                    self.tools.append(remote_tool)
+                elif name in attached:
+                    self.tools[existing] = remote_tool
+                else:
+                    raise ValueError(f"Duplicate tool name from MCP client: {name}")
+            attached.clear()
+            attached.update(current)
 
     def _execution(
         self,

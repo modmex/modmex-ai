@@ -51,8 +51,15 @@ class MCPClient:
         return await self.discover()
 
     async def close(self) -> None:
+        """Close the owned transport; the client can reconnect afterwards.
+
+        Serverless hosts commonly connect and close per invocation (often each
+        on its own event loop) while keeping the client at module scope, so a
+        fresh, lazily-opened transport replaces the closed one.
+        """
         if self._owns_http:
             await self.http.close()
+            self.http = AsyncHttpClient()
 
     async def list_tools(self) -> list[RemoteTool]:
         definitions = await self._list_all("tools/list", "tools")
