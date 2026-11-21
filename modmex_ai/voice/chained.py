@@ -164,7 +164,6 @@ class ChainedVoiceSession(VoiceAgentSession):
         )
         try:
             async for transcription in transcription_session.transcriptions():
-                self._raise_if_turn_cancelled()
                 await self._emit(VoiceSessionEvent(
                     type=(
                         VoiceSessionEventType.TRANSCRIPT_FINAL
@@ -175,6 +174,9 @@ class ChainedVoiceSession(VoiceAgentSession):
                 ))
                 if transcription.is_final:
                     yield await self._process_transcript_turn(transcription.text)
+                    # A cancel issued while the host played that reply targets
+                    # playback (barge-in), not the caller's next turn.
+                    self._turn_cancelled.clear()
         finally:
             if not producer.done():
                 producer.cancel()
@@ -188,8 +190,9 @@ class ChainedVoiceSession(VoiceAgentSession):
                 raise producer_error
 
     async def _feed_live_audio(self, transcription_session, input_events: AsyncIterator[VoiceInputEvent]) -> None:
+        # Cancellation stops turn processing only; audio keeps flowing so the
+        # caller can be heard after an interruption.
         async for event in input_events:
-            self._raise_if_turn_cancelled()
             if event.type == VoiceInputEventType.AUDIO:
                 if event.audio is None:
                     raise ValueError("An audio input event requires audio bytes")
@@ -228,6 +231,23 @@ class ChainedVoiceSession(VoiceAgentSession):
             raise TypeError("speech_to_text does not implement StreamingSpeechToTextProvider")
         if not isinstance(self.text_to_speech, StreamingTextToSpeechProvider):
             raise TypeError("text_to_speech does not implement StreamingTextToSpeechProvider")
+        self._begin_turn()
+        try:
+            async for chunk in self._process_audio_stream(audio):
+                yield chunk
+        except VoiceTurnCancelled:
+            self._finish_turn(VoiceTurnReason.CANCELLED)
+            raise
+        except Exception:
+            self._finish_turn({
+                "stt": VoiceTurnReason.STT_FAILED,
+                "tts": VoiceTurnReason.TTS_FAILED,
+            }.get(self._turn_stage, VoiceTurnReason.AGENT_FAILED))
+            raise
+        self._finish_turn(VoiceTurnReason.COMPLETED)
+
+    async def _process_audio_stream(self, audio: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
+        self._turn_stage = "stt"
         final_transcript: str | None = None
         async for transcription in self.speech_to_text.transcribe_stream(audio, context=self.context):
             self._raise_if_turn_cancelled()
@@ -241,7 +261,7 @@ class ChainedVoiceSession(VoiceAgentSession):
                 final_transcript = transcription.text
         if final_transcript is None:
             raise ValueError("Streaming transcription ended without a final transcript")
-        result = await self._run_turn(final_transcript)
+        result = await self._measure("agent", self._run_turn(final_transcript))
         await self._emit_agent_events(result)
         self.current_agent = result.last_agent
         self.usage.add(result.usage)
@@ -250,6 +270,7 @@ class ChainedVoiceSession(VoiceAgentSession):
             type=VoiceSessionEventType.ASSISTANT_TRANSCRIPT_FINAL,
             data={"transcript": response_text},
         ))
+        self._turn_stage = "tts"
         async for chunk in self.text_to_speech.synthesize_stream(response_text, context=self.context):
             self._raise_if_turn_cancelled()
             yield chunk
@@ -352,7 +373,10 @@ class ChainedVoiceSession(VoiceAgentSession):
             )
         self.last_turn = VoiceTurnOutcome(reason=reason, metrics=self._turn_metrics)
         for observer in self.turn_observers:
-            observer.on_voice_turn_finished(self.last_turn)
+            try:
+                observer.on_voice_turn_finished(self.last_turn)
+            except Exception:  # metrics must never change or mask the turn outcome
+                pass
 
     async def _emit_agent_events(self, result: Any) -> None:
         agent_results = getattr(result, "agent_results", [result])

@@ -500,3 +500,49 @@ async def _empty_events():
 async def _empty_audio():
     if False:
         yield b""
+
+
+def test_live_barge_in_cancel_does_not_end_the_conversation():
+    async def input_events():
+        yield VoiceInputEvent.audio_chunk(b"first")
+        yield VoiceInputEvent.commit_turn()
+        yield VoiceInputEvent.audio_chunk(b"second")
+        yield VoiceInputEvent.commit_turn()
+
+    async def run():
+        session = ChainedVoiceSession(
+            agent=Agent(name="dispatcher", instructions="Help.", model=FakeModel(["First reply.", "Second reply."])),
+            speech_to_text=FakeLiveSpeechToText(),
+            text_to_speech=FakeTextToSpeech(),
+        )
+        replies = []
+        async for reply in session.process_live_audio(input_events()):
+            replies.append(reply)
+            session.cancel_current_turn()  # caller interrupts while this reply plays
+        assert replies == [b"audio:First reply.", b"audio:Second reply."]
+        assert session.last_turn.reason == VoiceTurnReason.COMPLETED
+
+    asyncio.run(run())
+
+
+def test_streaming_turn_records_outcome_and_observer_errors_do_not_mask_it():
+    class BrokenObserver:
+        def on_voice_turn_finished(self, outcome):
+            raise RuntimeError("metrics backend down")
+
+    async def chunks():
+        yield b"audio"
+
+    async def run():
+        session = ChainedVoiceSession(
+            agent=Agent(name="dispatcher", instructions="Help.", model=FakeModel(["Streamed reply."])),
+            speech_to_text=FakeStreamingSpeechToText(),
+            text_to_speech=FakeStreamingTextToSpeech(),
+            turn_observers=[BrokenObserver()],
+        )
+        audio = [chunk async for chunk in session.process_audio_stream(chunks())]
+        assert audio
+        assert session.last_turn.reason == VoiceTurnReason.COMPLETED
+        assert session.last_turn.metrics.total_latency_ms >= 0
+
+    asyncio.run(run())
