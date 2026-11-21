@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Callable
 from typing import Any
 
@@ -63,211 +62,48 @@ class Flow:
         state_metadata: dict[str, Any] | None = None,
         ttl: int | None = None,
     ) -> FlowResult:
-        trace = Trace()
-        run_context = RunContext(
-            input=input, context=context, metadata=metadata or {}, trace=trace
-        )
-        agent_name = (
-            self._agent_name(starting_agent)
-            if starting_agent is not None
-            else self.entrypoint
-        )
-        agent_results: list[AgentResult] = []
-        output: Any = None
-        usage = Usage()
-        active_provider_state = provider_state
-        history_items = session.get_items() if session else []
-        current_items = self._items_for_input(input)
-        input_items = [*history_items, *current_items]
-        conversation_items = input_items.copy()
-        agent_input = self._initial_agent_input(
-            input=input,
-            current_items=current_items,
-            input_items=input_items,
-            session=session,
-            provider_state=provider_state,
-        )
-
-        for handoff_index in range(self.max_handoffs + 1):
-            agent = self._agent(agent_name)
+        state = _FlowRun(self, input, **_run_options(locals()))
+        for agent in state.agents():
             try:
-                result = agent.run(
-                    agent_input,
-                    model=self.model,
-                    context=run_context,
-                    provider_state=active_provider_state,
-                    run_input_guardrails=handoff_index == 0,
-                )
+                result = agent.run(state.agent_input, **state.agent_kwargs())
             except ApprovalRequired as error:
-                raise self._suspended_error(
-                    error=error,
-                    agent_name=agent.name,
-                    input_items=input_items,
-                    session=session,
-                    provider_state=run_context.state.get(
-                        "__modmex_ai_approval_checkpoint", {}
-                    ).get("provider_state", active_provider_state),
-                    checkpoint=run_context.state.get("__modmex_ai_approval_checkpoint"),
-                    flow_instance_id=flow_instance_id,
-                    idempotency_key=idempotency_key,
-                    metadata=state_metadata,
-                    ttl=ttl,
-                ) from error
-            agent_results.append(result)
-            usage.add(result.usage)
-            if result.provider_state is not None:
-                active_provider_state = result.provider_state
-            output = result.output
-
-            if not result.handoff_target:
+                raise state.suspended(error, agent) from error
+            if state.accept(agent, result):
                 break
-            handoff = self._handoff_for_result(agent, result)
-            conversation_items.extend(result.items)
-            run_context.state["handoff"] = {
-                "from": agent.name,
-                "to": result.handoff_target,
-                "input": serialize(result.handoff_input),
-            }
-            trace.add(
-                "handoff", agent.name, to=result.handoff_target, index=handoff_index
-            )
-            agent_name = result.handoff_target
-            agent_input = self._handoff_input(handoff, conversation_items, result)
-        else:
-            raise MaxHandoffsExceeded(f"Flow {self.name!r} exceeded max_handoffs")
+        return state.finish()
 
-        events = self.emit(output, agent_results) if self.emit else []
-        generated_items = [
-            item for agent_result in agent_results for item in agent_result.items
-        ]
-        output_items = [
-            *generated_items,
-            *([self._item_for_output(output)] if output is not None else []),
-        ]
-        if session:
-            session.add_items([*current_items, *output_items])
-        return FlowResult(
-            output=output,
-            last_agent=agent,
-            last_agent_name=agent.name,
-            continuation=FlowContinuation(
-                agent_name=agent.name,
-                provider_state=active_provider_state,
-            ),
-            agent_results=agent_results,
-            events=events,
-            usage=usage,
-            provider_state=active_provider_state,
-            input_items=input_items,
-            output_items=output_items,
-            trace=trace,
+    async def run_async(
+        self,
+        input: Any,
+        *,
+        starting_agent: str | Agent | None = None,
+        context: Any = None,
+        metadata: dict[str, Any] | None = None,
+        session: Session | None = None,
+        provider_state: ProviderState | None = None,
+        flow_instance_id: str | None = None,
+        idempotency_key: str | None = None,
+        state_metadata: dict[str, Any] | None = None,
+        ttl: int | None = None,
+    ) -> FlowResult:
+        """Run natively when the active model exposes ``acomplete``."""
+        options = _run_options(locals())
+        first_agent = self._agent(
+            self._agent_name(starting_agent) if starting_agent is not None else self.entrypoint
         )
-
-    async def run_async(self, input: Any, **kwargs: Any) -> FlowResult:
-        """Run natively when an active agent exposes ``acomplete``."""
-        starting_agent = kwargs.get("starting_agent")
-        agent_name = (
-            self._agent_name(starting_agent)
-            if starting_agent is not None
-            else self.entrypoint
-        )
-        first_agent = self._agent(agent_name)
         if not callable(getattr(self.model or first_agent.model, "acomplete", None)):
-            return await asyncio.to_thread(self.run, input, **kwargs)
-        context_value = kwargs.get("context")
-        metadata = kwargs.get("metadata")
-        session = kwargs.get("session")
-        provider_state = kwargs.get("provider_state")
-        trace = Trace()
-        run_context = RunContext(
-            input=input, context=context_value, metadata=metadata or {}, trace=trace
-        )
-        agent_results: list[AgentResult] = []
-        usage = Usage()
-        active_provider_state = provider_state
-        history_items = session.get_items() if session else []
-        current_items = self._items_for_input(input)
-        input_items = [*history_items, *current_items]
-        conversation_items = input_items.copy()
-        agent_input = self._initial_agent_input(
-            input=input,
-            current_items=current_items,
-            input_items=input_items,
-            session=session,
-            provider_state=provider_state,
-        )
-        output: Any = None
-        for handoff_index in range(self.max_handoffs + 1):
-            agent = self._agent(agent_name)
+            import asyncio
+
+            return await asyncio.to_thread(lambda: self.run(input, **options))
+        state = _FlowRun(self, input, **options)
+        for agent in state.agents():
             try:
-                result = await agent.run_async(
-                    agent_input,
-                    model=self.model,
-                    context=run_context,
-                    provider_state=active_provider_state,
-                    run_input_guardrails=handoff_index == 0,
-                )
+                result = await agent.run_async(state.agent_input, **state.agent_kwargs())
             except ApprovalRequired as error:
-                raise self._suspended_error(
-                    error=error,
-                    agent_name=agent.name,
-                    input_items=input_items,
-                    session=session,
-                    provider_state=run_context.state.get(
-                        "__modmex_ai_approval_checkpoint", {}
-                    ).get("provider_state", active_provider_state),
-                    checkpoint=run_context.state.get("__modmex_ai_approval_checkpoint"),
-                    flow_instance_id=kwargs.get("flow_instance_id"),
-                    idempotency_key=kwargs.get("idempotency_key"),
-                    metadata=kwargs.get("state_metadata"),
-                    ttl=kwargs.get("ttl"),
-                ) from error
-            agent_results.append(result)
-            usage.add(result.usage)
-            if result.provider_state is not None:
-                active_provider_state = result.provider_state
-            output = result.output
-            if not result.handoff_target:
+                raise state.suspended(error, agent) from error
+            if state.accept(agent, result):
                 break
-            handoff = self._handoff_for_result(agent, result)
-            conversation_items.extend(result.items)
-            run_context.state["handoff"] = {
-                "from": agent.name,
-                "to": result.handoff_target,
-                "input": serialize(result.handoff_input),
-            }
-            trace.add(
-                "handoff", agent.name, to=result.handoff_target, index=handoff_index
-            )
-            agent_name = result.handoff_target
-            agent_input = self._handoff_input(handoff, conversation_items, result)
-        else:
-            raise MaxHandoffsExceeded(f"Flow {self.name!r} exceeded max_handoffs")
-        events = self.emit(output, agent_results) if self.emit else []
-        generated_items = [
-            item for agent_result in agent_results for item in agent_result.items
-        ]
-        output_items = [
-            *generated_items,
-            *([self._item_for_output(output)] if output is not None else []),
-        ]
-        if session:
-            session.add_items([*current_items, *output_items])
-        return FlowResult(
-            output=output,
-            last_agent=agent,
-            last_agent_name=agent.name,
-            continuation=FlowContinuation(
-                agent_name=agent.name, provider_state=active_provider_state
-            ),
-            agent_results=agent_results,
-            events=events,
-            usage=usage,
-            provider_state=active_provider_state,
-            input_items=input_items,
-            output_items=output_items,
-            trace=trace,
-        )
+        return state.finish()
 
     def run_stream(
         self,
@@ -278,43 +114,17 @@ class Flow:
         metadata: dict[str, Any] | None = None,
         session: Session | None = None,
         provider_state: ProviderState | None = None,
+        flow_instance_id: str | None = None,
+        idempotency_key: str | None = None,
+        state_metadata: dict[str, Any] | None = None,
+        ttl: int | None = None,
     ):
         """Stream active-agent events and continue transparently through handoffs."""
-        trace = Trace()
-        run_context = RunContext(
-            input=input, context=context, metadata=metadata or {}, trace=trace
-        )
-        agent_name = (
-            self._agent_name(starting_agent)
-            if starting_agent is not None
-            else self.entrypoint
-        )
-        agent_results: list[AgentResult] = []
-        usage = Usage()
-        active_provider_state = provider_state
-        history_items = session.get_items() if session else []
-        current_items = self._items_for_input(input)
-        input_items = [*history_items, *current_items]
-        conversation_items = input_items.copy()
-        agent_input = self._initial_agent_input(
-            input=input,
-            current_items=current_items,
-            input_items=input_items,
-            session=session,
-            provider_state=provider_state,
-        )
-        output: Any = None
-        for handoff_index in range(self.max_handoffs + 1):
-            agent = self._agent(agent_name)
+        state = _FlowRun(self, input, **_run_options(locals()))
+        for agent in state.agents():
             result: AgentResult | None = None
             try:
-                for event in agent.run_stream(
-                    agent_input,
-                    model=self.model,
-                    context=run_context,
-                    provider_state=active_provider_state,
-                    run_input_guardrails=handoff_index == 0,
-                ):
+                for event in agent.run_stream(state.agent_input, **state.agent_kwargs()):
                     yield FlowStreamEvent(
                         type=FlowStreamEventType.AGENT,
                         agent_name=agent.name,
@@ -323,73 +133,12 @@ class Flow:
                     if event.result is not None:
                         result = event.result
             except ApprovalRequired as error:
-                checkpoint = run_context.state.get(
-                    "__modmex_ai_approval_checkpoint", {}
-                )
-                raise self._suspended_error(
-                    error=error,
-                    agent_name=agent.name,
-                    input_items=input_items,
-                    session=session,
-                    provider_state=checkpoint.get(
-                        "provider_state", active_provider_state
-                    ),
-                    checkpoint=checkpoint or None,
-                    flow_instance_id=None,
-                    idempotency_key=None,
-                    metadata=None,
-                    ttl=None,
-                ) from error
+                raise state.suspended(error, agent) from error
             if result is None:
                 raise RuntimeError("Agent stream ended without an AgentResult")
-            agent_results.append(result)
-            usage.add(result.usage)
-            active_provider_state = result.provider_state or active_provider_state
-            output = result.output
-            if not result.handoff_target:
+            if state.accept(agent, result):
                 break
-            handoff = self._handoff_for_result(agent, result)
-            conversation_items.extend(result.items)
-            run_context.state["handoff"] = {
-                "from": agent.name,
-                "to": result.handoff_target,
-                "input": serialize(result.handoff_input),
-            }
-            trace.add(
-                "handoff", agent.name, to=result.handoff_target, index=handoff_index
-            )
-            agent_name = result.handoff_target
-            agent_input = self._handoff_input(handoff, conversation_items, result)
-        else:
-            raise MaxHandoffsExceeded(f"Flow {self.name!r} exceeded max_handoffs")
-        events = self.emit(output, agent_results) if self.emit else []
-        generated_items = [
-            item for agent_result in agent_results for item in agent_result.items
-        ]
-        output_items = [
-            *generated_items,
-            *([self._item_for_output(output)] if output is not None else []),
-        ]
-        if session:
-            session.add_items([*current_items, *output_items])
-        yield FlowStreamEvent(
-            type=FlowStreamEventType.COMPLETED,
-            result=FlowResult(
-                output=output,
-                last_agent=agent,
-                last_agent_name=agent.name,
-                continuation=FlowContinuation(
-                    agent_name=agent.name, provider_state=active_provider_state
-                ),
-                agent_results=agent_results,
-                events=events,
-                usage=usage,
-                provider_state=active_provider_state,
-                input_items=input_items,
-                output_items=output_items,
-                trace=trace,
-            ),
-        )
+        yield FlowStreamEvent(type=FlowStreamEventType.COMPLETED, result=state.finish())
 
     async def arun_stream(
         self,
@@ -400,42 +149,18 @@ class Flow:
         metadata: dict[str, Any] | None = None,
         session: Session | None = None,
         provider_state: ProviderState | None = None,
+        flow_instance_id: str | None = None,
+        idempotency_key: str | None = None,
+        state_metadata: dict[str, Any] | None = None,
+        ttl: int | None = None,
     ):
         """Native async streaming across agents and handoffs."""
-        trace = Trace()
-        run_context = RunContext(
-            input=input, context=context, metadata=metadata or {}, trace=trace
-        )
-        agent_name = (
-            self._agent_name(starting_agent)
-            if starting_agent is not None
-            else self.entrypoint
-        )
-        agent_results: list[AgentResult] = []
-        usage = Usage()
-        active_provider_state = provider_state
-        history_items = session.get_items() if session else []
-        current_items = self._items_for_input(input)
-        input_items = [*history_items, *current_items]
-        conversation_items = input_items.copy()
-        agent_input = self._initial_agent_input(
-            input=input,
-            current_items=current_items,
-            input_items=input_items,
-            session=session,
-            provider_state=provider_state,
-        )
-        output: Any = None
-        for handoff_index in range(self.max_handoffs + 1):
-            agent = self._agent(agent_name)
+        state = _FlowRun(self, input, **_run_options(locals()))
+        for agent in state.agents():
             result: AgentResult | None = None
             try:
                 async for event in agent.arun_stream(
-                    agent_input,
-                    model=self.model,
-                    context=run_context,
-                    provider_state=active_provider_state,
-                    run_input_guardrails=handoff_index == 0,
+                    state.agent_input, **state.agent_kwargs()
                 ):
                     yield FlowStreamEvent(
                         type=FlowStreamEventType.AGENT,
@@ -445,73 +170,12 @@ class Flow:
                     if event.result is not None:
                         result = event.result
             except ApprovalRequired as error:
-                checkpoint = run_context.state.get(
-                    "__modmex_ai_approval_checkpoint", {}
-                )
-                raise self._suspended_error(
-                    error=error,
-                    agent_name=agent.name,
-                    input_items=input_items,
-                    session=session,
-                    provider_state=checkpoint.get(
-                        "provider_state", active_provider_state
-                    ),
-                    checkpoint=checkpoint or None,
-                    flow_instance_id=None,
-                    idempotency_key=None,
-                    metadata=None,
-                    ttl=None,
-                ) from error
+                raise state.suspended(error, agent) from error
             if result is None:
                 raise RuntimeError("Agent stream ended without an AgentResult")
-            agent_results.append(result)
-            usage.add(result.usage)
-            active_provider_state = result.provider_state or active_provider_state
-            output = result.output
-            if not result.handoff_target:
+            if state.accept(agent, result):
                 break
-            handoff = self._handoff_for_result(agent, result)
-            conversation_items.extend(result.items)
-            run_context.state["handoff"] = {
-                "from": agent.name,
-                "to": result.handoff_target,
-                "input": serialize(result.handoff_input),
-            }
-            trace.add(
-                "handoff", agent.name, to=result.handoff_target, index=handoff_index
-            )
-            agent_name = result.handoff_target
-            agent_input = self._handoff_input(handoff, conversation_items, result)
-        else:
-            raise MaxHandoffsExceeded(f"Flow {self.name!r} exceeded max_handoffs")
-        events = self.emit(output, agent_results) if self.emit else []
-        generated_items = [
-            item for agent_result in agent_results for item in agent_result.items
-        ]
-        output_items = [
-            *generated_items,
-            *([self._item_for_output(output)] if output is not None else []),
-        ]
-        if session:
-            session.add_items([*current_items, *output_items])
-        yield FlowStreamEvent(
-            type=FlowStreamEventType.COMPLETED,
-            result=FlowResult(
-                output=output,
-                last_agent=agent,
-                last_agent_name=agent.name,
-                continuation=FlowContinuation(
-                    agent_name=agent.name, provider_state=active_provider_state
-                ),
-                agent_results=agent_results,
-                events=events,
-                usage=usage,
-                provider_state=active_provider_state,
-                input_items=input_items,
-                output_items=output_items,
-                trace=trace,
-            ),
-        )
+        yield FlowStreamEvent(type=FlowStreamEventType.COMPLETED, result=state.finish())
 
     def resume(
         self,
@@ -766,8 +430,14 @@ class Flow:
             name=request.tool_name,
             arguments=request.arguments,
         )
+        if flow_instance_id is None and session is None:
+            # Never key a durable state by the flow name: concurrent suspensions of
+            # the same flow would overwrite each other.
+            from uuid import uuid4
+
+            flow_instance_id = f"{self.name}-{uuid4().hex}"
         snapshot = SessionSnapshot(
-            session_id=session.id if session else flow_instance_id or self.name,
+            session_id=session.id if session else flow_instance_id,
             items=self._items_for_input(checkpoint["items"][1:])
             if checkpoint
             else [*input_items, pending_call],
@@ -818,3 +488,162 @@ class Flow:
                 "Suspended Flow state does not contain a session snapshot."
             )
         return state.session_snapshot.to_memory_session()
+
+
+_RUN_OPTIONS = (
+    "starting_agent",
+    "context",
+    "metadata",
+    "session",
+    "provider_state",
+    "flow_instance_id",
+    "idempotency_key",
+    "state_metadata",
+    "ttl",
+)
+
+
+def _run_options(scope: dict[str, Any]) -> dict[str, Any]:
+    return {name: scope[name] for name in _RUN_OPTIONS}
+
+
+class _FlowRun:
+    """State of one Flow execution, shared by every execution mode.
+
+    The four public entry points (run, run_async, run_stream, arun_stream) only
+    differ in how they call the active agent; setup, handoff bookkeeping,
+    suspension and the final result live here so they cannot drift apart.
+    """
+
+    def __init__(
+        self,
+        flow: Flow,
+        input: Any,
+        *,
+        starting_agent: str | Agent | None,
+        context: Any,
+        metadata: dict[str, Any] | None,
+        session: Session | None,
+        provider_state: ProviderState | None,
+        flow_instance_id: str | None,
+        idempotency_key: str | None,
+        state_metadata: dict[str, Any] | None,
+        ttl: int | None,
+    ) -> None:
+        self.flow = flow
+        self.trace = Trace()
+        self.run_context = RunContext(
+            input=input, context=context, metadata=metadata or {}, trace=self.trace
+        )
+        self.agent_name = (
+            flow._agent_name(starting_agent)
+            if starting_agent is not None
+            else flow.entrypoint
+        )
+        self.session = session
+        self.flow_instance_id = flow_instance_id
+        self.idempotency_key = idempotency_key
+        self.state_metadata = state_metadata
+        self.ttl = ttl
+        self.agent_results: list[AgentResult] = []
+        self.usage = Usage()
+        self.output: Any = None
+        self.provider_state = provider_state
+        history_items = session.get_items() if session else []
+        self.current_items = flow._items_for_input(input)
+        self.input_items = [*history_items, *self.current_items]
+        self.conversation_items = self.input_items.copy()
+        self.agent_input = flow._initial_agent_input(
+            input=input,
+            current_items=self.current_items,
+            input_items=self.input_items,
+            session=session,
+            provider_state=provider_state,
+        )
+        self.handoff_index = 0
+        self.agent: Agent | None = None
+
+    def agents(self):
+        """Yield the active agent for each turn until one finishes without a handoff."""
+        for index in range(self.flow.max_handoffs + 1):
+            self.handoff_index = index
+            self.agent = self.flow._agent(self.agent_name)
+            yield self.agent
+        raise MaxHandoffsExceeded(f"Flow {self.flow.name!r} exceeded max_handoffs")
+
+    def agent_kwargs(self) -> dict[str, Any]:
+        return {
+            "model": self.flow.model,
+            "context": self.run_context,
+            "provider_state": self.provider_state,
+            "run_input_guardrails": self.handoff_index == 0,
+        }
+
+    def suspended(self, error: ApprovalRequired, agent: Agent) -> FlowSuspended:
+        checkpoint = self.run_context.state.get("__modmex_ai_approval_checkpoint")
+        return self.flow._suspended_error(
+            error=error,
+            agent_name=agent.name,
+            input_items=self.input_items,
+            session=self.session,
+            provider_state=(checkpoint or {}).get("provider_state", self.provider_state),
+            checkpoint=checkpoint or None,
+            flow_instance_id=self.flow_instance_id,
+            idempotency_key=self.idempotency_key,
+            metadata=self.state_metadata,
+            ttl=self.ttl,
+        )
+
+    def accept(self, agent: Agent, result: AgentResult) -> bool:
+        """Record a finished agent run; return True when the flow is done."""
+        self.agent_results.append(result)
+        self.usage.add(result.usage)
+        if result.provider_state is not None:
+            self.provider_state = result.provider_state
+        self.output = result.output
+        if not result.handoff_target:
+            return True
+        handoff = self.flow._handoff_for_result(agent, result)
+        self.conversation_items.extend(result.items)
+        self.run_context.state["handoff"] = {
+            "from": agent.name,
+            "to": result.handoff_target,
+            "input": serialize(result.handoff_input),
+        }
+        self.trace.add(
+            "handoff", agent.name, to=result.handoff_target, index=self.handoff_index
+        )
+        self.agent_name = result.handoff_target
+        self.agent_input = self.flow._handoff_input(
+            handoff, self.conversation_items, result
+        )
+        return False
+
+    def finish(self) -> FlowResult:
+        assert self.agent is not None
+        output = self.output
+        events = self.flow.emit(output, self.agent_results) if self.flow.emit else []
+        generated_items = [
+            item for agent_result in self.agent_results for item in agent_result.items
+        ]
+        output_items = [
+            *generated_items,
+            *([self.flow._item_for_output(output)] if output is not None else []),
+        ]
+        if self.session:
+            self.session.add_items([*self.current_items, *output_items])
+        return FlowResult(
+            output=output,
+            last_agent=self.agent,
+            last_agent_name=self.agent.name,
+            continuation=FlowContinuation(
+                agent_name=self.agent.name, provider_state=self.provider_state
+            ),
+            agent_results=self.agent_results,
+            events=events,
+            usage=self.usage,
+            provider_state=self.provider_state,
+            input_items=self.input_items,
+            output_items=output_items,
+            trace=self.trace,
+        )
