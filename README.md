@@ -347,8 +347,27 @@ serialize an `InMemorySession` and later restore it with
 `snapshot.to_memory_session()`.
 
 `ChainedVoiceSession.process_audio_stream()` supports providers that implement
-streaming STT and TTS contracts. It emits transcript deltas, waits for a final
-transcript before invoking the text flow, then yields playable audio chunks.
+streaming STT and TTS contracts. It emits transcript deltas and waits for a final
+transcript before invoking the text flow.
+
+When every agent's model streams natively (`astream`, as the OpenAI and Anthropic
+adapters do), the reply is spoken **while it is generated**: model text is split
+into sentences and each one is synthesized as soon as it is complete, while the
+model keeps writing the next. The caller hears the first sentence instead of
+waiting for the whole reply, which matters most with thinking models. Text a model
+writes before calling a tool ("Let me check your load.") is spoken while the tool
+runs. Agents with structured output (`output_type`) or output guardrails are not
+spoken early, since their text is not speakable or could still be rejected; their
+final reply is synthesized when the turn completes, as before. Turn off with
+`VoiceTurnOptions(speak_while_generating=False)`.
+`VoiceTurnMetrics.first_audio_latency_ms` reports time to the first audio chunk.
+A turn cancelled mid-reply is not saved to the session.
+
+Claude has no speech-to-speech, STT or TTS API; use it as the reasoning step of a
+chained session with any STT/TTS provider. For voice, keep `reasoning_effort`
+low and consider the instruction "Latency-sensitive; begin your visible answer
+immediately." so the model starts speaking sooner.
+
 The callable adapters make it possible to plug in a provider-specific function
 without making that provider a dependency of `modmex-ai`.
 

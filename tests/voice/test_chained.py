@@ -546,3 +546,160 @@ def test_streaming_turn_records_outcome_and_observer_errors_do_not_mask_it():
         assert session.last_turn.metrics.total_latency_ms >= 0
 
     asyncio.run(run())
+
+
+# --- speak while generating -------------------------------------------------
+
+from modmex_ai.models import ModelProfile, ModelStreamEvent, ModelStreamEventType
+from modmex_ai.voice import VoiceTurnOptions
+from modmex_ai.voice.segment import SentenceBuffer
+from modmex_ai import tool
+
+
+class ScriptedStreamingModel:
+    """Native async-streaming model: each turn is (text deltas, final response)."""
+
+    name = "scripted"
+    profile = ModelProfile(supports_structured_output=True)
+
+    def __init__(self, turns, *, gate_after_first_delta=None):
+        self.turns = list(turns)
+        self.gate = gate_after_first_delta
+
+    def complete(self, request):
+        raise AssertionError("voice streaming must not use complete()")
+
+    async def astream(self, request):
+        deltas, response = self.turns.pop(0)
+        for index, delta in enumerate(deltas):
+            yield ModelStreamEvent(type=ModelStreamEventType.TEXT_DELTA, text_delta=delta)
+            if index == 0 and self.gate is not None:
+                await asyncio.wait_for(self.gate.wait(), 1)  # resumes only once TTS started
+        yield ModelStreamEvent.completed(response)
+
+
+class RecordingStreamingTts(FakeStreamingTextToSpeech):
+    def __init__(self, started=None):
+        self.texts = []
+        self.started = started
+
+    async def synthesize_stream(self, text, *, context):
+        self.texts.append(text)
+        if self.started is not None:
+            self.started.set()
+        yield f"audio:{text}".encode()
+
+
+async def _one_chunk():
+    yield b"caller"
+
+
+def test_sentence_buffer_splits_on_sentence_ends_not_decimals():
+    buffer = SentenceBuffer()
+    out = []
+    for delta in ["Hola, ", "claro. El costo es 3.5 ", "dólares! ¿Algo más", "? Ok.", " Gracias."]:
+        out += buffer.feed(delta)
+    assert out == ["Hola, claro.", "El costo es 3.5 dólares!", "¿Algo más? Ok."]
+    assert buffer.flush() == "Gracias."
+    long = SentenceBuffer(max_chars=40)
+    assert long.feed("palabra " * 10) == ["palabra palabra palabra palabra palabra"]
+    assert long.flush() == "palabra palabra palabra palabra palabra"
+
+
+def test_streaming_turn_speaks_first_sentence_while_model_is_still_generating():
+    async def run():
+        tts_started = asyncio.Event()
+        model = ScriptedStreamingModel(
+            [(["Claro, te ayudo. ", "Tu carga sale mañana ", "a las ocho."],
+              ModelResponse(output_text="Claro, te ayudo. Tu carga sale mañana a las ocho."))],
+            gate_after_first_delta=tts_started,
+        )
+        tts = RecordingStreamingTts(started=tts_started)
+        session = ChainedVoiceSession(
+            agent=Agent(name="dispatcher", instructions="Help.", model=model),
+            speech_to_text=FakeStreamingSpeechToText(),
+            text_to_speech=tts,
+        )
+        audio = [chunk async for chunk in session.process_audio_stream(_one_chunk())]
+        await session.close()
+        events = [event async for event in session.voice_events()]
+
+        assert tts.texts == ["Claro, te ayudo.", "Tu carga sale mañana a las ocho."]
+        assert audio == ["audio:Claro, te ayudo.".encode(), "audio:Tu carga sale mañana a las ocho.".encode()]
+        final = [e for e in events if e.type == VoiceSessionEventType.ASSISTANT_TRANSCRIPT_FINAL]
+        assert final[0].data["transcript"] == "Claro, te ayudo. Tu carga sale mañana a las ocho."
+        assert session.last_turn.reason == VoiceTurnReason.COMPLETED
+        metrics = session.last_turn.metrics
+        assert 0 <= metrics.first_audio_latency_ms <= metrics.total_latency_ms
+        assert [item.role for item in session.session.get_items()] == ["user", "assistant"]
+
+    asyncio.run(run())
+
+
+def test_streaming_turn_speaks_preamble_before_a_tool_runs():
+    calls = []
+
+    @tool
+    def lookup_load(load_id: str) -> dict:
+        """Look up a load."""
+        calls.append(load_id)
+        return {"status": "in transit"}
+
+    async def run():
+        model = ScriptedStreamingModel([
+            (["Déjame revisar tu carga. "], ModelResponse(
+                output_text="Déjame revisar tu carga.",
+                tool_calls=[ToolCall(tool_call_id="t1", name="lookup_load", arguments={"load_id": "L1"})],
+            )),
+            (["Tu carga va en tránsito."], ModelResponse(output_text="Tu carga va en tránsito.")),
+        ])
+        tts = RecordingStreamingTts()
+        session = ChainedVoiceSession(
+            agent=Agent(name="dispatcher", instructions="Help.", tools=[lookup_load], model=model),
+            speech_to_text=FakeStreamingSpeechToText(),
+            text_to_speech=tts,
+        )
+        _ = [chunk async for chunk in session.process_audio_stream(_one_chunk())]
+        assert calls == ["L1"]
+        assert tts.texts == ["Déjame revisar tu carga.", "Tu carga va en tránsito."]
+
+    asyncio.run(run())
+
+
+def test_structured_output_agent_is_spoken_once_complete():
+    from modmex import BaseModel as ModmexModel
+
+    class Reply(ModmexModel):
+        reply: str
+
+    async def run():
+        model = ScriptedStreamingModel([
+            (['{"reply":', '"Listo."}'], ModelResponse(output_text='{"reply":"Listo."}')),
+        ])
+        tts = RecordingStreamingTts()
+        session = ChainedVoiceSession(
+            agent=Agent(name="dispatcher", instructions="Help.", output_type=Reply, model=model),
+            speech_to_text=FakeStreamingSpeechToText(),
+            text_to_speech=tts,
+        )
+        _ = [chunk async for chunk in session.process_audio_stream(_one_chunk())]
+        assert tts.texts == ["Listo."]  # JSON fragments were never spoken
+
+    asyncio.run(run())
+
+
+def test_speak_while_generating_can_be_disabled():
+    async def run():
+        model = ScriptedStreamingModel([])
+        model.complete = lambda request: ModelResponse(output_text="Una. Dos.")
+        tts = RecordingStreamingTts()
+        session = ChainedVoiceSession(
+            agent=Agent(name="dispatcher", instructions="Help.", model=model),
+            speech_to_text=FakeStreamingSpeechToText(),
+            text_to_speech=tts,
+            turn_options=VoiceTurnOptions(speak_while_generating=False),
+        )
+        _ = [chunk async for chunk in session.process_audio_stream(_one_chunk())]
+        assert tts.texts == ["Una. Dos."]
+
+    asyncio.run(run())

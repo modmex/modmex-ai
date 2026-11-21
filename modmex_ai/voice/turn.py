@@ -7,11 +7,15 @@ from modmex import BaseModel
 
 
 class VoiceTurnOptions(BaseModel):
-    """Retry policy for provider I/O within a single chained voice turn."""
+    """Retry policy and pacing for a single chained voice turn."""
 
     max_provider_retries: int = 0
     retry_delay_seconds: float = 0.0
     timeout_seconds: float | None = None
+    # Streaming turns: synthesize each sentence as soon as the model writes it,
+    # instead of waiting for the whole reply. Applies to text-output agents
+    # without output guardrails whose models stream natively (astream).
+    speak_while_generating: bool = True
 
 
 class VoiceTurnReason(str, Enum):
@@ -28,6 +32,8 @@ class VoiceTurnMetrics(BaseModel):
     agent_latency_ms: int = 0
     tts_latency_ms: int = 0
     total_latency_ms: int = 0
+    # Time from turn start to the first synthesized audio chunk (0 = no audio).
+    first_audio_latency_ms: int = 0
     provider_retry_count: int = 0
 
 
