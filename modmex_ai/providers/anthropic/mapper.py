@@ -653,9 +653,22 @@ class _StreamAccumulator:
             self.message = dict(event.get("message") or {})
         elif event_type == "content_block_start":
             index = event.get("index", len(self.blocks))
-            self.blocks[index] = dict(event.get("content_block") or {})
-            if self.blocks[index].get("type") == "tool_use":
+            block = self.blocks[index] = dict(event.get("content_block") or {})
+            if block.get("type") == "tool_use":
                 self.partial_json[index] = ""
+                # Announce the call as soon as it starts (tools without
+                # arguments get no input_json_delta), like the OpenAI adapters.
+                return [
+                    ModelStreamEvent(
+                        type=ModelStreamEventType.TOOL_CALL_DELTA,
+                        tool_call=ToolCall(
+                            tool_call_id=block.get("id", ""),
+                            name=block.get("name", ""),
+                            arguments="",
+                        ),
+                        raw=event,
+                    )
+                ]
         elif event_type == "content_block_delta":
             return self._delta(event)
         elif event_type == "content_block_stop":

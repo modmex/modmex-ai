@@ -214,11 +214,18 @@ def main() -> None:
             "pick_city. Then get that city's weather and answer in one sentence."
         )
         assert tool_calls == ["Paris"], f"tool calls: {tool_calls}"
+        received = [[b.get("type") for b in body.get("content", [])] for _, body in recorder.exchanges]
         sent = [
             [b.get("type") for m in req["messages"] if m["role"] == "assistant" for b in m["content"]]
             for req, _ in recorder.exchanges
         ]
-        return f"requests={len(sent)} assistant blocks sent={sent} output={result.output!r}"
+        # Thinking from turn 1 (old tool set) must not be sent after the switch;
+        # thinking produced after the switch must still be replayed.
+        stale_dropped = "thinking" not in (sent[1] if len(sent) > 1 else [])
+        return (
+            f"requests={len(sent)} received={received} sent={sent} "
+            f"stale_thinking_dropped={stale_dropped} output={result.output!r}"
+        )
 
     check("complete", complete)
     check("structured", structured)

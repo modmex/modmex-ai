@@ -10,14 +10,20 @@ What it does:
   1. Synthesizes a spoken Spanish question with OpenAI TTS (the "caller").
   2. Runs one chained voice turn: OpenAI STT -> Claude agent with a tool ->
      OpenAI TTS, speaking sentence by sentence while Claude generates.
-  3. Runs the same turn with speak_while_generating=False for comparison.
-  4. Writes both replies to .examples/output/*.wav and prints the latencies.
+  3. Runs the same turn with speak_while_generating=False, alternating the two
+     modes twice (new, old, new, old) and comparing medians, since Claude's
+     replies and network latency vary between runs.
+  4. Writes the replies to .examples/output/*.wav and prints the latencies.
+
+The load-lookup tool simulates 0.8 s of backend latency, as a real lookup has;
+that is when speaking the model's preamble ("Déjame revisar.") saves silence.
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
+import statistics
 import sys
 import time
 import wave
@@ -39,13 +45,15 @@ OUTPUT = Path(__file__).resolve().parents[1] / "output"
 QUESTION = "Hola, ¿me puedes decir en qué estatus va la carga L cien y a qué hora llega?"
 PCM_RATE = 24_000  # OpenAI "pcm" speech format: 24 kHz, 16-bit, mono
 
+BACKEND_LATENCY_S = 0.8
 lookups: list[str] = []
 
 
 @tool
-def lookup_load(load_id: str) -> dict:
+async def lookup_load(load_id: str) -> dict:
     """Look up a load's status and ETA by its id (e.g. "L-100")."""
     lookups.append(load_id)
+    await asyncio.sleep(BACKEND_LATENCY_S)  # simulated backend call
     return {"load_id": "L-100", "status": "en tránsito", "eta": "hoy 18:30", "city": "Monterrey"}
 
 
@@ -157,17 +165,26 @@ async def main() -> None:
     await question_tts.aclose()
     print(f"pregunta del usuario: {QUESTION!r} ({len(caller_audio)} bytes de audio)")
 
-    streamed = await run_turn(caller_audio, speak_while_generating=True)
-    report("por oraciones (nuevo)", streamed, OUTPUT / "voice_streamed.wav")
-    buffered = await run_turn(caller_audio, speak_while_generating=False)
-    report("respuesta completa (anterior)", buffered, OUTPUT / "voice_buffered.wav")
+    runs: dict[bool, list[dict]] = {True: [], False: []}
+    for round_number in (1, 2):
+        for speak in (True, False):
+            result = await run_turn(caller_audio, speak_while_generating=speak)
+            runs[speak].append(result)
+            label = "por oraciones (nuevo)" if speak else "respuesta completa (anterior)"
+            suffix = "streamed" if speak else "buffered"
+            report(f"{label} #{round_number}", result, OUTPUT / f"voice_{suffix}_{round_number}.wav")
 
-    for result in (streamed, buffered):
+    for result in runs[True] + runs[False]:
         check(result["audio"], "no audio was produced")
         check(any("100" in load for load in result["lookups"]), f"tool not called with L-100: {result['lookups']}")
-    check(len(streamed["segments"]) >= 2, f"expected several TTS segments, got {streamed['segments']}")
-    gain = buffered["first_audio_s"] - streamed["first_audio_s"]
-    print(f"\nprimer audio {gain:+.2f}s más rápido con el modo por oraciones")
+    check(
+        any(len(result["segments"]) >= 2 for result in runs[True]),
+        f"expected several TTS segments, got {[r['segments'] for r in runs[True]]}",
+    )
+    new = statistics.median(r["first_audio_s"] for r in runs[True])
+    old = statistics.median(r["first_audio_s"] for r in runs[False])
+    print(f"\nprimer audio (mediana de 2): nuevo {new:.2f}s vs anterior {old:.2f}s -> {old - new:+.2f}s")
+    print(f"(la herramienta simula {BACKEND_LATENCY_S}s de latencia de backend)")
     print("all checks passed")
 
 

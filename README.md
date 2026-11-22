@@ -366,7 +366,9 @@ for playback (e.g. `OpenAISpeechProvider(response_format="pcm")`); container
 formats such as WAV or MP3 repeat their header per sentence. To use a
 request-based STT such as `OpenAITranscriptionProvider` here, wrap it in
 `BufferedStreamingSpeechToText`.
-A turn cancelled mid-reply is not saved to the session.
+A turn cancelled mid-reply is not saved to the session. Write tools used in voice
+turns as `async def` (or offload blocking I/O to a thread): a synchronous, blocking
+tool stalls the event loop, so the sentence spoken before it cannot play meanwhile.
 
 Claude has no speech-to-speech, STT or TTS API; use it as the reasoning step of a
 chained session with any STT/TTS provider. For voice, keep `reasoning_effort`

@@ -575,6 +575,9 @@ class ScriptedStreamingModel:
             yield ModelStreamEvent(type=ModelStreamEventType.TEXT_DELTA, text_delta=delta)
             if index == 0 and self.gate is not None:
                 await asyncio.wait_for(self.gate.wait(), 1)  # resumes only once TTS started
+        for call in response.tool_calls:  # as real adapters: the call is announced before it runs
+            yield ModelStreamEvent(type=ModelStreamEventType.TOOL_CALL_DELTA, tool_call=ToolCall(
+                tool_call_id=call.tool_call_id, name=call.name, arguments=""))
         yield ModelStreamEvent.completed(response)
 
 
@@ -722,3 +725,40 @@ def test_buffered_streaming_stt_adapts_a_request_based_provider():
 
     result = asyncio.run(run())
     assert [(t.text, t.is_final) for t in result] == [("heard abcd", True)]
+
+
+def test_preamble_without_trailing_space_is_spoken_before_the_tool_runs():
+    order = []
+
+    @tool
+    def lookup_load(load_id: str) -> dict:
+        """Look up a load."""
+        order.append("tool")
+        return {"status": "in transit"}
+
+    class OrderedTts(RecordingStreamingTts):
+        async def synthesize_stream(self, text, *, context):
+            order.append(f"say:{text}")
+            async for chunk in super().synthesize_stream(text, context=context):
+                yield chunk
+
+    async def run():
+        model = ScriptedStreamingModel([
+            (["Déjame ", "revisar."], ModelResponse(  # no trailing whitespace, as Claude wrote it live
+                output_text="Déjame revisar.",
+                tool_calls=[ToolCall(tool_call_id="t1", name="lookup_load", arguments={"load_id": "L1"})],
+            )),
+            (["La carga va en tránsito."], ModelResponse(output_text="La carga va en tránsito.")),
+        ])
+        tts = OrderedTts()
+        session = ChainedVoiceSession(
+            agent=Agent(name="dispatcher", instructions="Help.", tools=[lookup_load], model=model),
+            speech_to_text=FakeStreamingSpeechToText(),
+            text_to_speech=tts,
+        )
+        _ = [chunk async for chunk in session.process_audio_stream(_one_chunk())]
+        assert tts.texts == ["Déjame revisar.", "La carga va en tránsito."]
+        assert order.index("say:Déjame revisar.") < order.index("tool")
+        assert order[-1] == "say:La carga va en tránsito."
+
+    asyncio.run(run())

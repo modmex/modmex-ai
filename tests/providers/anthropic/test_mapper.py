@@ -368,7 +368,7 @@ def test_stream_events_rebuild_final_message():
     tool = [e.tool_call for e in events if e.type == ModelStreamEventType.TOOL_CALL_DELTA]
     final = events[-1].response
     assert text == ["Let me ", "check."]
-    assert [t.arguments for t in tool] == ['{"city": ', '"Paris"}']
+    assert [t.arguments for t in tool] == ["", '{"city": ', '"Paris"}']  # start, then fragments
     assert tool[0].tool_call_id == "toolu_9" and tool[0].name == "get_weather"
     assert final.output_text == "Let me check."
     assert final.stop_reason == "tool_use"

@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 
-from modmex_ai.agents import Agent, RunContext
+from modmex_ai.agents import Agent, AgentStreamEventType, RunContext
 from modmex_ai.errors import ToolExecutionError, VoiceTurnCancelled
 from modmex_ai.flows import Flow, FlowStreamEventType
 from modmex_ai.models import Usage
@@ -312,6 +312,12 @@ class ChainedVoiceSession(VoiceAgentSession):
         queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
         agent_started = perf_counter()
 
+        async def say(sentence: str) -> None:
+            await queue.put(("say", sentence))
+            # Let the consumer start synthesizing before generation (or a tool
+            # call) continues; an unbounded put never yields on its own.
+            await asyncio.sleep(0)
+
         async def produce() -> None:
             buffer = SentenceBuffer()
             speaking_agent: str | None = None
@@ -320,18 +326,32 @@ class ChainedVoiceSession(VoiceAgentSession):
                     if event.type == FlowStreamEventType.COMPLETED:
                         tail = buffer.flush()
                         if tail:
-                            await queue.put(("say", tail))
+                            await say(tail)
+                        # Generation time, excluding the TTS that overlapped it.
+                        self._turn_metrics.agent_latency_ms = int(
+                            (perf_counter() - agent_started) * 1000
+                        )
                         await queue.put(("done", event.result))
                         return
-                    if event.agent_name != speaking_agent:
-                        tail = buffer.flush()  # never join two agents' sentences
+                    agent_event = event.agent_event
+                    is_text = (
+                        agent_event is not None
+                        and agent_event.type == AgentStreamEventType.TEXT_DELTA
+                    )
+                    if event.agent_name != speaking_agent or not is_text:
+                        # The model stopped writing text (tool call, tool result,
+                        # handoff, another agent): speak what it wrote so far now,
+                        # e.g. "Let me check." before a tool runs. Models often end
+                        # that text without trailing whitespace.
+                        tail = buffer.flush()
                         if tail:
-                            await queue.put(("say", tail))
+                            await say(tail)
                         speaking_agent = event.agent_name
-                    delta = event.agent_event.text_delta if event.agent_event else None
-                    if delta and _speakable(self.flow.agents.get(event.agent_name)):
-                        for sentence in buffer.feed(delta):
-                            await queue.put(("say", sentence))
+                    if is_text and agent_event.text_delta and _speakable(
+                        self.flow.agents.get(event.agent_name)
+                    ):
+                        for sentence in buffer.feed(agent_event.text_delta):
+                            await say(sentence)
             except Exception as error:  # surfaced to the consumer; cancellation propagates
                 await queue.put(("error", error))
 
@@ -350,7 +370,6 @@ class ChainedVoiceSession(VoiceAgentSession):
                 spoken.append(value)
                 async for chunk in self._synthesize_segment(value):
                     yield chunk
-            self._turn_metrics.agent_latency_ms = int((perf_counter() - agent_started) * 1000)
             self.continuation = VoiceContinuation.from_flow(result.continuation)
             await self._emit_agent_events(result)
             self.current_agent = result.last_agent
