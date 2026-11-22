@@ -457,9 +457,30 @@ def test_client_closes_owned_http_and_supports_explicit_tool_page() -> None:
 def test_tool_call_is_not_retried_once_the_request_may_have_run(monkeypatch):
     import asyncio
 
-    import httpx
-
+    import modmex_ai.http.async_client as async_client
     from modmex_ai.http import AsyncHttpClient, RetryConfig
+
+    # Stand-in for the optional httpx dependency (not installed without the
+    # "async" extra): only the exception hierarchy the transport maps matters.
+    class TransportError(Exception):
+        pass
+
+    class FakeHttpx:
+        class TimeoutException(TransportError):
+            pass
+
+        class HTTPStatusError(Exception):
+            pass
+
+        class ConnectError(TransportError):
+            pass
+
+        class ReadError(TransportError):
+            pass
+
+    FakeHttpx.TransportError = TransportError
+    httpx = FakeHttpx
+    monkeypatch.setattr(async_client, "_httpx", lambda: FakeHttpx)
     from modmex_ai.mcp import MCPClient
     from modmex_ai.mcp.client import TOOL_CALL_RETRY
     from modmex_ai.errors import ProviderConnectionError
