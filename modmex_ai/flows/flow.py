@@ -24,6 +24,9 @@ from modmex_ai.tracing import Trace
 
 
 EmitFn = Callable[[Any, list[AgentResult]], list[dict[str, Any]]]
+# Context sent with one turn only and never stored in the session: a string
+# (sent as a developer message) or a list of messages.
+TurnContext = str | list[Message | SessionItem | dict[str, Any]] | None
 
 
 class Flow:
@@ -61,6 +64,7 @@ class Flow:
         idempotency_key: str | None = None,
         state_metadata: dict[str, Any] | None = None,
         ttl: int | None = None,
+        turn_context: TurnContext = None,
     ) -> FlowResult:
         state = _FlowRun(self, input, **_run_options(locals()))
         for agent in state.agents():
@@ -85,6 +89,7 @@ class Flow:
         idempotency_key: str | None = None,
         state_metadata: dict[str, Any] | None = None,
         ttl: int | None = None,
+        turn_context: TurnContext = None,
     ) -> FlowResult:
         """Run natively when the active model exposes ``acomplete``."""
         options = _run_options(locals())
@@ -122,6 +127,7 @@ class Flow:
         idempotency_key: str | None = None,
         state_metadata: dict[str, Any] | None = None,
         ttl: int | None = None,
+        turn_context: TurnContext = None,
     ):
         """Stream active-agent events and continue transparently through handoffs."""
         state = _FlowRun(self, input, **_run_options(locals()))
@@ -157,6 +163,7 @@ class Flow:
         idempotency_key: str | None = None,
         state_metadata: dict[str, Any] | None = None,
         ttl: int | None = None,
+        turn_context: TurnContext = None,
     ):
         """Native async streaming across agents and handoffs."""
         state = _FlowRun(self, input, **_run_options(locals()))
@@ -189,8 +196,13 @@ class Flow:
         approval_policy: ApprovalPolicy,
         context: Any = None,
         metadata: dict[str, Any] | None = None,
+        turn_context: TurnContext = None,
     ) -> FlowResult:
-        """Execute the suspended tool once, then continue from the saved checkpoint."""
+        """Execute the suspended tool once, then continue from the saved checkpoint.
+
+        ``turn_context`` is not stored in the suspended state; pass the (current)
+        context again here if the resumed turn needs it.
+        """
         agent, suspension, run_context = self._prepare_resume(
             state, decision, approval_policy=approval_policy, context=context, metadata=metadata
         )
@@ -200,6 +212,7 @@ class Flow:
         return self.run(
             self._resume_input(suspension, result),
             **self._resume_options(state, agent, context=context, metadata=metadata),
+            turn_context=turn_context,
         )
 
     async def resume_async(
@@ -210,6 +223,7 @@ class Flow:
         approval_policy: ApprovalPolicy,
         context: Any = None,
         metadata: dict[str, Any] | None = None,
+        turn_context: TurnContext = None,
     ) -> FlowResult:
         """Async counterpart of :meth:`resume` for async tools and model clients."""
         agent, suspension, run_context = self._prepare_resume(
@@ -221,6 +235,7 @@ class Flow:
         return await self.run_async(
             self._resume_input(suspension, result),
             **self._resume_options(state, agent, context=context, metadata=metadata),
+            turn_context=turn_context,
         )
 
     def _prepare_resume(
@@ -491,6 +506,7 @@ _RUN_OPTIONS = (
     "idempotency_key",
     "state_metadata",
     "ttl",
+    "turn_context",
 )
 
 
@@ -520,6 +536,7 @@ class _FlowRun:
         idempotency_key: str | None,
         state_metadata: dict[str, Any] | None,
         ttl: int | None,
+        turn_context: TurnContext = None,
     ) -> None:
         self.flow = flow
         self.trace = Trace()
@@ -551,6 +568,19 @@ class _FlowRun:
             session=session,
             provider_state=provider_state,
         )
+        self.turn_context = _turn_context_items(flow, turn_context)
+        if self.turn_context:
+            if provider_state is not None and provider_state.has_remote_state:
+                raise ValueError(
+                    "turn_context requires stateless mode: with server-side "
+                    "conversation state the provider would store it every turn"
+                )
+            # [history, this turn's input, this turn's context]: the history prefix
+            # stays identical between turns (prompt caching), the context never
+            # lands among the leading instructions, and it is never written to the
+            # session, so there is exactly one, current copy.
+            self.agent_input = [*history_items, *self.current_items, *self.turn_context]
+            self.conversation_items = list(self.agent_input)
         self.handoff_index = 0
         self.agent: Agent | None = None
 
@@ -572,6 +602,13 @@ class _FlowRun:
 
     def suspended(self, error: ApprovalRequired, agent: Agent) -> FlowSuspended:
         checkpoint = self.run_context.state.get("__modmex_ai_approval_checkpoint")
+        if checkpoint and self.turn_context:
+            # Turn context is not durable; pass it again to resume().
+            excluded = {id(item) for item in self.turn_context}
+            checkpoint = {
+                **checkpoint,
+                "items": [item for item in checkpoint["items"] if id(item) not in excluded],
+            }
         return self.flow._suspended_error(
             error=error,
             agent_name=agent.name,
@@ -621,6 +658,10 @@ class _FlowRun:
             *generated_items,
             *([self.flow._item_for_output(output)] if output is not None else []),
         ]
+        if self.turn_context:
+            # Thinking signatures from this turn are bound to a prefix that
+            # included the turn context, which the next turn will not send.
+            output_items = [_without_provider_data(item) for item in output_items]
         if self.session:
             self.session.add_items([*self.current_items, *output_items])
         return FlowResult(
@@ -638,3 +679,19 @@ class _FlowRun:
             output_items=output_items,
             trace=self.trace,
         )
+
+
+def _turn_context_items(flow: Flow, turn_context: TurnContext) -> list[SessionItem]:
+    if not turn_context:
+        return []
+    if isinstance(turn_context, str):
+        return [SessionItem(role="developer", content=turn_context)]
+    if not isinstance(turn_context, list):
+        raise TypeError("turn_context must be a string or a list of messages")
+    return flow._items_for_input(turn_context)
+
+
+def _without_provider_data(item: SessionItem) -> SessionItem:
+    if item.provider_data is None:
+        return item
+    return SessionItem(**{**item.__dict__, "provider_data": None})

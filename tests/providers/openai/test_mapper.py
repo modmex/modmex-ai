@@ -713,3 +713,18 @@ def test_stop_reason_is_normalized_for_openai():
         headers={}, status_code=200, model="m",
     ))
     assert streamed[-1].response.stop_reason == "max_tokens"
+
+
+def test_only_leading_instructions_go_to_responses_instructions():
+    from modmex_ai.messages import Message
+    from modmex_ai.models import ModelRequest
+    from modmex_ai.providers.openai.mapper import to_responses_payload
+
+    payload = to_responses_payload(ModelRequest(messages=[
+        Message(role="system", content="Base."),
+        Message(role="user", content="hola"),
+        Message(role="assistant", content="candidato"),
+        Message(role="developer", content="Corrige el formato."),  # e.g. guardrail retry
+    ]), "gpt-test")
+    assert payload["instructions"] == "Base."
+    assert payload["input"][-1] == {"role": "developer", "content": [{"type": "input_text", "text": "Corrige el formato."}]}

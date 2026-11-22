@@ -196,6 +196,38 @@ print(response.output_text)
 adapter implements their distinct wire format. Use `OpenAIResponsesModel` for
 multimodal input.
 
+## Per-turn context
+
+Context that is true *now* — the customer's open quotes, the current load status,
+today's date — should not be part of the stored conversation: stored once per turn,
+it accumulates, and the model sees several conflicting versions (and may call tools
+again to find out which is current). Pass it as `turn_context`:
+
+```python
+result = flow.run(
+    whatsapp_message,
+    session=session,
+    turn_context=f"Cliente: {customer}. Cotizaciones abiertas: {open_quotes}.",
+)
+```
+
+- It is sent with this turn only, after the turn's input, and never written to the
+  session: the model always sees exactly one, current copy.
+- The agent's instructions and the stored history stay byte-identical between
+  turns, so prompt caching keeps working (it is not merged into OpenAI
+  `instructions`; with Claude it is a native mid-conversation system message).
+- A string is sent as a developer message; a list of messages is sent as given.
+- Handoff targets in the same turn receive it too.
+- It is not stored in a suspended (approval) state; pass the current context again
+  to `Flow.resume(..., turn_context=...)`.
+- It requires stateless mode: with server-side conversation state
+  (`previous_response_id` / `conversation_id`) the provider would store it, so it
+  raises `ValueError`.
+
+Only leading system/developer messages go to OpenAI Responses `instructions`; later
+ones are sent in place, so mid-conversation instructions (including output-guardrail
+retries) no longer rewrite the cached prefix.
+
 ## Durable sessions and approvals
 
 The core provides portable `SessionSnapshot` and `PersistedFlowState` models,

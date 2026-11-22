@@ -511,21 +511,35 @@ def _provider_state_from_response(payload: dict[str, Any]) -> ProviderState | No
 def _split_instructions(
     messages: list[Message | SessionItem],
 ) -> tuple[str | None, list[dict[str, Any]]]:
+    """Leading system/developer messages become ``instructions``; later ones stay in place.
+
+    ``instructions`` is the start of the cached prefix, so only the stable
+    leading instructions go there. A system/developer message that appears after
+    the conversation started (per-turn context, a guardrail retry) is sent as an
+    input message at its position instead of rewriting ``instructions``.
+    """
     instructions: list[str] = []
     input_items: list[dict[str, Any]] = []
     for item in messages:
+        role = getattr(item, "role", None)
+        is_message = isinstance(item, Message) or (
+            isinstance(item, SessionItem) and item.type == "message"
+        )
+        if is_message and role in {"system", "developer"}:
+            text = _instructions_payload(item.content)
+            if not input_items:
+                instructions.append(text)
+            else:
+                input_items.append(
+                    {"role": role, "content": [{"type": "input_text", "text": text}]}
+                )
+            continue
         if isinstance(item, SessionItem):
-            if item.type == "message" and item.role in {"system", "developer"}:
-                instructions.append(_instructions_payload(item.content))
-                continue
             operation = _operation_input_item(item)
             if operation is not None:
                 input_items.append(operation)
             continue
         message = item
-        if message.role in ("system", "developer"):
-            instructions.append(_instructions_payload(message.content))
-            continue
         if message.role == "tool":
             input_items.append(
                 {
