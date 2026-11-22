@@ -228,7 +228,7 @@ class MCPClient:
                 **wire_params,
                 "_meta": {
                     "io.modelcontextprotocol/protocolVersion": self.protocol_version,
-                    "io.modelcontextprotocol/clientInfo": {"name": "modmex-ai", "version": "0.2.0"},
+                    "io.modelcontextprotocol/clientInfo": {"name": "modmex-ai", "version": _client_version()},
                     "io.modelcontextprotocol/clientCapabilities": {},
                     **wire_params.get("_meta", {}),
                 },
@@ -284,6 +284,22 @@ class MCPClient:
     @staticmethod
     def _encode_header(value: str, *, force: bool = False) -> str:
         return encode_mcp_header_value(value, force=force)
+
+
+_CLIENT_VERSION: str | None = None
+
+
+def _client_version() -> str:
+    """Installed modmex-ai version, read once (MCP clientInfo)."""
+    global _CLIENT_VERSION
+    if _CLIENT_VERSION is None:
+        try:
+            from importlib.metadata import version
+
+            _CLIENT_VERSION = version("modmex-ai")
+        except Exception:
+            _CLIENT_VERSION = "unknown"
+    return _CLIENT_VERSION
 
 
 def _supported(function: Any, **options: Any) -> dict[str, Any]:
