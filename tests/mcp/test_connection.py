@@ -104,7 +104,8 @@ def test_discovery_overlaps_between_servers(use_manager):
         ready = asyncio.Event()
 
         class ConcurrentHttp(ConnectionHttp):
-            async def post_json(self, url, **kwargs):
+            async def post_json(self, url, *, headers=None, data=None, timeout=None):
+                kwargs = {"headers": headers, "data": data, "timeout": timeout}
                 if kwargs["data"]["method"] == "server/discover":
                     started.add(url)
                     if len(started) == 2:
@@ -149,5 +150,51 @@ def test_client_validates_ids_for_overlapping_requests():
         client = MCPClient("test", http=ConcurrentHttp())
         assert await asyncio.gather(client.call_tool("one"), client.call_tool("two")) == ["one", "two"]
         assert [request["id"] for request in requests] == [1, 2]
+
+    asyncio.run(run())
+
+
+def test_owned_client_reconnects_after_close_on_a_new_event_loop():
+    from modmex_ai.http.async_client import AsyncHttpClient
+    from modmex_ai.mcp import MCPClientManager
+
+    connection = MCPClientConnection("https://example.test/mcp")
+    first_transport = connection.client.http
+
+    async def invocation():
+        connection.client.http.post_json = ConnectionHttp().post_json  # stub the wire
+        async with MCPClientManager([connection]):
+            return [tool.name for tool in connection.tools]
+
+    assert asyncio.run(invocation()) == ["lookup"]
+    assert first_transport.is_closed
+    assert isinstance(connection.client.http, AsyncHttpClient) and not connection.client.http.is_closed
+    assert asyncio.run(invocation()) == ["lookup"]  # second warm invocation
+
+
+def test_agent_drops_mcp_tools_the_server_no_longer_lists():
+    class CatalogHttp(ConnectionHttp):
+        def __init__(self):
+            super().__init__()
+            self.names = ["lookup", "delete_all"]
+
+        async def post_json(self, url, *, headers=None, data=None, timeout=None):
+            if data["method"] == "tools/list":
+                tools = [{"name": name, "inputSchema": {}} for name in self.names]
+                return HttpResponse(status_code=200, headers={}, body={"jsonrpc": "2.0", "id": data["id"], "result": {"resultType": "complete", "tools": tools}})
+            return await super().post_json(url, headers=headers, data=data, timeout=timeout)
+
+    async def run():
+        http = CatalogHttp()
+        connection = MCPClientConnection(MCPClient("https://example.test/mcp", http=http))
+        agent = Agent(name="a", instructions="", mcp_clients=[connection],
+                      model=FakeModel([ModelResponse(output_text="one"), ModelResponse(output_text="two")]))
+        await agent.run_async("go")
+        assert sorted(tool.name for tool in agent.tools) == ["delete_all", "lookup"]
+
+        http.names = ["lookup"]
+        await connection.refresh_tools()
+        await agent.run_async("again")
+        assert [tool.name for tool in agent.tools] == ["lookup"]
 
     asyncio.run(run())

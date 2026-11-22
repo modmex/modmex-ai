@@ -129,7 +129,7 @@ def test_pending_tool_call_retained_and_orphan_output_rejected():
         compactor(FakeModel([])).compact(items)
 
 
-@pytest.mark.parametrize("summary", ["", " " * 3, "x" * 6001])
+@pytest.mark.parametrize("summary", ["", " " * 3, "x" * 16_001])
 def test_invalid_summary_keeps_original_context(summary):
     items = history()
     result = compactor(FakeModel([summary])).compact(items)
@@ -254,3 +254,148 @@ def test_non_reducing_summary_keeps_original_snapshot_and_reports_usage():
     assert result.messages == items
     assert result.snapshot is None
     assert result.usage.total_tokens == 99
+
+
+THINKING = {"type": "thinking", "thinking": "", "signature": "sig-" + "x" * 400}
+
+
+def tool_history(turns=8, *, open_call=False):
+    items = [Message(role="system", content="Keep this instruction verbatim.")]
+    for i in range(turns):
+        call_id = f"toolu_{i}"
+        items += [
+            Message(role="user", content=f"turn-{i} " + "long content " * 30),
+            SessionItem(
+                type="function_call",
+                tool_call_id=call_id,
+                name="lookup",
+                arguments={"q": i},
+                provider_data={"anthropic": {"content": [THINKING, {"type": "tool_use", "id": call_id, "name": "lookup", "input": {"q": i}}]}},
+            ),
+            SessionItem(type="function_call_output", tool_call_id=call_id, name="lookup", output={"ok": i}),
+            Message(role="assistant", content=f"answer-{i}"),
+        ]
+    if open_call:
+        items += [
+            Message(role="user", content="one more"),
+            SessionItem(
+                type="function_call",
+                tool_call_id="toolu_open",
+                name="lookup",
+                arguments={},
+                provider_data={"anthropic": {"content": [THINKING, {"type": "tool_use", "id": "toolu_open", "name": "lookup", "input": {}}]}},
+            ),
+        ]
+    return items
+
+
+def test_compaction_drops_provider_data_from_retained_completed_turns():
+    model = FakeModel([ModelResponse(output_text="Earlier lookups returned ok.")])
+    original = tool_history()
+    result = compactor(model).compact(original)
+
+    assert result.status == "compacted"
+    retained = [item for item in result.messages if isinstance(item, SessionItem)]
+    assert retained and all(item.provider_data is None for item in retained)
+    # The caller's history is not mutated.
+    assert all(item.provider_data for item in original if getattr(item, "type", None) == "function_call")
+
+
+def test_compaction_keeps_provider_data_of_unfinished_tool_round():
+    model = FakeModel([ModelResponse(output_text="Earlier lookups returned ok.")])
+    result = compactor(model).compact(tool_history(open_call=True))
+
+    assert result.status == "compacted"
+    by_id = {item.tool_call_id: item for item in result.messages if isinstance(item, SessionItem) and item.type == "function_call"}
+    assert by_id["toolu_open"].provider_data is not None
+    assert all(item.provider_data is None for key, item in by_id.items() if key != "toolu_open")
+
+
+def test_summary_request_excludes_provider_data():
+    model = FakeModel([ModelResponse(output_text="Earlier lookups returned ok.")])
+    compactor(model).compact(tool_history())
+
+    request_text = model.requests[0].messages[-1].content
+    assert "sig-" not in request_text and "provider_data\":{" not in request_text
+
+
+def test_truncated_summary_is_rejected():
+    model = FakeModel([ModelResponse(output_text="Earlier lookups ret", stop_reason="max_tokens")])
+    original = tool_history()
+    result = compactor(model).compact(original)
+
+    assert result.status == "failed"
+    assert result.reason == "summary_truncated"
+    assert result.messages == original
+
+
+def test_compacted_tool_history_is_valid_anthropic_payload():
+    from modmex_ai.models import ModelRequest
+    from modmex_ai.providers.anthropic.mapper import to_messages_payload
+
+    model = FakeModel([ModelResponse(output_text="Earlier lookups returned ok.")])
+    result = compactor(model).compact(tool_history())
+    payload = to_messages_payload(ModelRequest(messages=result.messages), "claude-opus-5-5")
+
+    blocks = [block for message in payload["messages"] if isinstance(message["content"], list) for block in message["content"]]
+    assert not any(block["type"] == "thinking" for block in blocks)
+    uses = {block["id"] for block in blocks if block["type"] == "tool_use"}
+    results = {block["tool_use_id"] for block in blocks if block["type"] == "tool_result"}
+    assert uses and uses == results
+
+
+from modmex_ai import Agent, TokenEstimator
+
+
+def test_token_estimator_defaults_to_four_bytes_per_token():
+    estimator = TokenEstimator()
+    items = [Message(role="user", content="x" * 100)]
+    assert not estimator.calibrated
+    assert estimator(items) == -(-context_bytes(items) // 4)
+
+
+def test_token_estimator_learns_from_observations_and_ignores_outliers():
+    estimator = TokenEstimator(window=2)
+    assert estimator.observe(sent_bytes=3000, input_tokens=1000)  # 3 bytes/token
+    assert not estimator.observe(sent_bytes=100, input_tokens=5000)  # remote state: billed > sent
+    assert not estimator.observe(sent_bytes=0, input_tokens=10)
+    assert estimator.bytes_per_token == 3.0
+    estimator.observe(sent_bytes=5000, input_tokens=1000)
+    estimator.observe(sent_bytes=5000, input_tokens=1000)  # window keeps the last 2
+    assert estimator.bytes_per_token == 5.0
+    with pytest.raises(ValueError):
+        TokenEstimator(bytes_per_token=0.5)
+
+
+def test_token_estimator_calibrates_from_agent_trace():
+    model = FakeModel([ModelResponse(output_text="hola", usage=Usage(input_tokens=50, output_tokens=2, total_tokens=52))])
+    result = Agent(name="a", instructions="Be brief.", model=model).run("hola " * 40)
+    estimator = TokenEstimator()
+
+    assert estimator.observe_trace(result.trace) == 1
+    request = next(step for step in result.trace.steps if step.type == "model_request")
+    sent = request.data["context_bytes"] + request.data["tool_schema_bytes"]
+    assert estimator.bytes_per_token == sent / 50
+
+
+def test_compactor_uses_token_estimator_as_measure():
+    estimator = TokenEstimator(bytes_per_token=4.0)
+    original = history()
+    tokens = estimator(original)
+    model = FakeModel([ModelResponse(output_text="Earlier turns summarized.")])
+    compactor_ = ContextCompactor(
+        model=model, measure=estimator, threshold=tokens - 1, keep_recent_turns=2, max_input_size=tokens * 2
+    )
+    result = compactor_.compact(original)
+    assert result.status == "compacted"
+    assert result.before_size == tokens and result.after_size < tokens
+    # Same history, above threshold in bytes but below in tokens: unchanged.
+    assert ContextCompactor(model=model, measure=estimator, threshold=tokens + 1).compact(original).status == "unchanged"
+
+
+def test_default_measure_is_a_per_instance_token_estimator():
+    first = ContextCompactor(model=FakeModel([]))
+    second = ContextCompactor(model=FakeModel([]))
+    assert isinstance(first.measure, TokenEstimator)
+    assert first.measure is not second.measure
+    assert first.threshold == 60_000 and first.settings.max_tokens == 8_000

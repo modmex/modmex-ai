@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import os
 from typing import Any
 
@@ -38,6 +37,7 @@ class OpenAITranscriptionProvider(SpeechToTextProvider):
         self.http_client = http_client or HttpClient()
 
     async def transcribe(self, audio: bytes, *, context: RunContext) -> str:
+        import asyncio
         response = await asyncio.to_thread(
             self.http_client.post_multipart,
             f"{self.base_url}/audio/transcriptions",
@@ -102,6 +102,7 @@ class OpenAISpeechProvider(StreamingTextToSpeechProvider):
         )
 
     async def synthesize(self, text: str, *, context: RunContext) -> bytes:
+        import asyncio
         response = await asyncio.to_thread(
             self.http_client.post_json_bytes,
             f"{self.base_url}/audio/speech",
@@ -113,6 +114,7 @@ class OpenAISpeechProvider(StreamingTextToSpeechProvider):
         return response.body
 
     async def synthesize_stream(self, text: str, *, context: RunContext):
+        import asyncio
         if self.async_http_client is not None:
             async for chunk in self.async_http_client.post_json_stream(
                 f"{self.base_url}/audio/speech",

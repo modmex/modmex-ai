@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import asyncio
+from typing import Any
 
-from modmex_ai.http import AsyncHttpClient, HttpClient, parse_sse_lines, parse_sse_lines_async
-from modmex_ai.models import AsyncModelClient, ModelRequest, ModelResponse
+from modmex_ai.http import AsyncHttpClient, HttpClient
+from modmex_ai.models import ModelRequest, ModelResponse
+from modmex_ai.providers.http_model import HttpModel
 from modmex_ai.providers.openai.mapper import (
     from_responses_payload,
     responses_stream_events,
@@ -13,7 +14,9 @@ from modmex_ai.providers.openai.mapper import (
 from modmex_ai.providers.openai.profile import OPENAI_RESPONSES_PROFILE
 
 
-class OpenAIResponsesModel(AsyncModelClient):
+class OpenAIResponsesModel(HttpModel):
+    path = "/responses"
+
     def __init__(
         self,
         model: str,
@@ -25,99 +28,18 @@ class OpenAIResponsesModel(AsyncModelClient):
         organization: str | None = None,
         project: str | None = None,
     ) -> None:
-        self.name = model
-        self.model = model
-        self.api_key = api_key
-        self.base_url = base_url.rstrip("/")
-        self.http_client = http_client or HttpClient()
-        self._owns_async_http_client = async_http_client is None
-        self.async_http_client = async_http_client or (
-            AsyncHttpClient()
-            if http_client is None and AsyncHttpClient.is_available()
-            else None
+        super().__init__(
+            model,
+            base_url=base_url,
+            http_client=http_client,
+            async_http_client=async_http_client,
         )
+        self.api_key = api_key
         self.organization = organization
         self.project = project
         self.profile = OPENAI_RESPONSES_PROFILE
 
-    def complete(self, request: ModelRequest) -> ModelResponse:
-        payload = to_responses_payload(request, self.model)
-        response = self.http_client.post_json(
-            f"{self.base_url}/responses",
-            headers=self._headers(),
-            data=payload,
-            timeout=request.settings.timeout if request.settings else None,
-        )
-        return from_responses_payload(
-            response.body,
-            headers=response.headers,
-            status_code=response.status_code,
-            model=self.model,
-        )
-
-    async def aclose(self) -> None:
-        """Release the internally created native async transport, if any."""
-        if self._owns_async_http_client and self.async_http_client is not None:
-            await self.async_http_client.close()
-
-    async def acomplete(self, request: ModelRequest) -> ModelResponse:
-        if self.async_http_client is None:
-            return await asyncio.to_thread(self.complete, request)
-        payload = to_responses_payload(request, self.model)
-        response = await self.async_http_client.post_json(
-            f"{self.base_url}/responses",
-            headers=self._headers(),
-            data=payload,
-            timeout=request.settings.timeout if request.settings else None,
-        )
-        return from_responses_payload(
-            response.body,
-            headers=response.headers,
-            status_code=response.status_code,
-            model=self.model,
-        )
-
-    def stream(self, request: ModelRequest):
-        payload = to_responses_payload(request, self.model)
-        payload["stream"] = True
-        chunks = self.http_client.post_json_stream(
-            f"{self.base_url}/responses",
-            headers=self._headers(),
-            data=payload,
-            timeout=request.settings.timeout if request.settings else None,
-        )
-        yield from responses_stream_events(
-            parse_sse_lines(chunks),
-            headers={},
-            status_code=200,
-            model=self.model,
-        )
-
-    async def astream(self, request: ModelRequest):
-        payload = to_responses_payload(request, self.model)
-        payload["stream"] = True
-        if self.async_http_client is not None:
-            async for event in responses_stream_events_async(
-                parse_sse_lines_async(self.async_http_client.post_json_stream(
-                    f"{self.base_url}/responses",
-                    headers=self._headers(),
-                    data=payload,
-                    timeout=request.settings.timeout if request.settings else None,
-                )),
-                headers={},
-                status_code=200,
-                model=self.model,
-            ):
-                yield event
-            return
-        iterator = self.stream(request)
-        while True:
-            has_event, event = await asyncio.to_thread(_next_event, iterator)
-            if not has_event:
-                return
-            yield event
-
-    def _headers(self) -> dict[str, str]:
+    def _headers(self, request: ModelRequest | None = None) -> dict[str, str]:
         headers = {}
         if self.api_key:
             headers["authorization"] = f"Bearer {self.api_key}"
@@ -127,9 +49,23 @@ class OpenAIResponsesModel(AsyncModelClient):
             headers["OpenAI-Project"] = self.project
         return headers
 
+    def _payload(self, request: ModelRequest, *, stream: bool) -> dict[str, Any]:
+        payload = to_responses_payload(request, self.model)
+        if stream:
+            payload["stream"] = True
+        return payload
 
-def _next_event(iterator):
-    try:
-        return True, next(iterator)
-    except StopIteration:
-        return False, None
+    def _parse(self, body, *, headers, status_code, payload) -> ModelResponse:
+        return from_responses_payload(
+            body, headers=headers, status_code=status_code, model=self.model
+        )
+
+    def _events(self, payloads, *, payload):
+        return responses_stream_events(
+            payloads, headers={}, status_code=200, model=self.model
+        )
+
+    def _aevents(self, payloads, *, payload):
+        return responses_stream_events_async(
+            payloads, headers={}, status_code=200, model=self.model
+        )

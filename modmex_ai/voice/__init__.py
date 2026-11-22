@@ -10,6 +10,7 @@ from modmex_ai.voice.turn import VoiceTurnObserver
 from modmex_ai.voice.chained import ChainedVoiceSession
 from modmex_ai.voice.continuation import VoiceContinuation
 from modmex_ai.voice.providers import (
+    BufferedStreamingSpeechToText,
     CallableSpeechToTextProvider,
     CallableTextToSpeechProvider,
     LiveSpeechToTextProvider,
@@ -24,6 +25,7 @@ from modmex_ai.voice.providers import (
 )
 
 __all__ = [
+    "BufferedStreamingSpeechToText",
     "VoiceAgentSession",
     "ChainedVoiceSession",
     "VoiceContinuation",

@@ -452,3 +452,55 @@ def test_client_closes_owned_http_and_supports_explicit_tool_page() -> None:
         assert http.closed
 
     asyncio.run(run())
+
+
+def test_tool_call_is_not_retried_once_the_request_may_have_run(monkeypatch):
+    import asyncio
+
+    import httpx
+
+    from modmex_ai.http import AsyncHttpClient, RetryConfig
+    from modmex_ai.mcp import MCPClient
+    from modmex_ai.mcp.client import TOOL_CALL_RETRY
+    from modmex_ai.errors import ProviderConnectionError
+
+    sent = []
+
+    class FakeClient:
+        async def post(self, url, *, headers, json, timeout):
+            sent.append(json["method"])
+            if json["method"] == "tools/call":
+                raise httpx.ReadError("connection reset after send")
+            raise httpx.ConnectError("refused")
+
+        async def aclose(self):
+            pass
+
+    http = AsyncHttpClient(client=FakeClient(), retry=RetryConfig(attempts=2, backoff_seconds=0))
+    client = MCPClient("https://mcp.test", http=http)
+
+    with pytest.raises(ProviderConnectionError):
+        asyncio.run(client.call_tool("create_order", {"id": 1}))
+    assert sent == ["tools/call"]  # sent once: the server may have run it
+
+    sent.clear()
+    with pytest.raises(ProviderConnectionError):
+        asyncio.run(client.list_tools())
+    assert sent == ["tools/list"] * 3  # idempotent + unsent: retried
+    assert TOOL_CALL_RETRY.status_codes == {429}
+
+
+def test_http_error_status_is_reported(monkeypatch):
+    import asyncio
+
+    from modmex_ai.http import HttpResponse
+    from modmex_ai.mcp import MCPClient, MCPError
+
+    class Http:
+        async def post_json(self, url, *, headers=None, data=None, timeout=None):
+            return HttpResponse(status_code=401, headers={}, body={"detail": "bad token"})
+
+    with pytest.raises(MCPError) as error:
+        asyncio.run(MCPClient("https://mcp.test", http=Http()).list_tools())
+    assert error.value.http_status == 401
+    assert "HTTP 401" in error.value.message

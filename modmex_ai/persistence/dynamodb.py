@@ -23,11 +23,7 @@ class DynamoDbDurableSessionStore:
         return SessionSnapshot(**item["snapshot"]) if item else None
 
     def save(self, snapshot: SessionSnapshot, *, expected_revision: int) -> SessionSnapshot:
-        current = self.load(snapshot.session_id)
-        if current is not None and current.revision != expected_revision:
-            raise SessionConflictError(f"Session {snapshot.session_id!r} revision conflict")
-        if current is None and expected_revision != 0:
-            raise SessionConflictError(f"Session {snapshot.session_id!r} revision conflict")
+        # The conditional put is the compare-and-swap; no read-before-write needed.
         stored = SessionSnapshot(**{**snapshot.model_dump(), "revision": expected_revision + 1})
         try:
             self.connector.put({
@@ -53,11 +49,7 @@ class DynamoDbFlowStateStore:
         return PersistedFlowState(**item["state"]) if item else None
 
     def save(self, state: PersistedFlowState, *, expected_revision: int) -> PersistedFlowState:
-        current = self.load(state.flow_instance_id)
-        if current is not None and current.revision != expected_revision:
-            raise FlowStateConflictError(f"Flow {state.flow_instance_id!r} revision conflict")
-        if current is None and expected_revision != 0:
-            raise FlowStateConflictError(f"Flow {state.flow_instance_id!r} revision conflict")
+        # The conditional put is the compare-and-swap; no read-before-write needed.
         stored = PersistedFlowState(**{**state.model_dump(), "revision": expected_revision + 1})
         item = {**_key("flow_state", state.flow_instance_id), "state": stored.model_dump(), "revision": stored.revision, "status": stored.status}
         if stored.ttl is not None:
@@ -76,8 +68,20 @@ def _key(kind: str, identifier: str) -> dict[str, str]:
 
 
 def _revision_condition(expected_revision: int) -> dict[str, Any]:
+    """Create-only for revision 0, exact-revision match otherwise.
+
+    A missing item never satisfies an expected revision > 0 (e.g. a flow state
+    removed by TTL between turns), so stale writers cannot recreate it.
+    """
+    if not isinstance(expected_revision, int) or isinstance(expected_revision, bool) or expected_revision < 0:
+        raise ValueError("expected_revision must be a non-negative integer")
+    if expected_revision == 0:
+        return {
+            "ConditionExpression": "attribute_not_exists(#pk)",
+            "ExpressionAttributeNames": {"#pk": "pk"},
+        }
     return {
-        "ConditionExpression": "attribute_not_exists(#revision) OR #revision = :expected_revision",
+        "ConditionExpression": "#revision = :expected_revision",
         "ExpressionAttributeNames": {"#revision": "revision"},
         "ExpressionAttributeValues": {":expected_revision": expected_revision},
     }

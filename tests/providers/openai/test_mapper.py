@@ -693,3 +693,38 @@ def test_responses_history_uses_output_text_for_assistant_messages(
             "content": [{"type": "input_text", "text": "Follow-up question"}],
         },
     ]
+
+
+def test_stop_reason_is_normalized_for_openai():
+    from modmex_ai.providers.openai.mapper import chat_stream_events, from_chat_payload, from_responses_payload
+
+    chat = lambda reason: from_chat_payload({"choices": [{"message": {"content": "x"}, "finish_reason": reason}]}, headers={}, status_code=200, model="m")
+    assert chat("length").stop_reason == "max_tokens"
+    assert chat("stop").stop_reason == "end_turn"
+    assert chat("tool_calls").stop_reason == "tool_use"
+
+    responses = lambda **extra: from_responses_payload({"output": [], **extra}, headers={}, status_code=200, model="m")
+    assert responses(status="incomplete", incomplete_details={"reason": "max_output_tokens"}).stop_reason == "max_tokens"
+    assert responses(status="completed").stop_reason == "end_turn"
+    assert responses().stop_reason is None
+
+    streamed = list(chat_stream_events(
+        [{"choices": [{"delta": {"content": "x"}}]}, {"choices": [{"delta": {}, "finish_reason": "length"}]}],
+        headers={}, status_code=200, model="m",
+    ))
+    assert streamed[-1].response.stop_reason == "max_tokens"
+
+
+def test_only_leading_instructions_go_to_responses_instructions():
+    from modmex_ai.messages import Message
+    from modmex_ai.models import ModelRequest
+    from modmex_ai.providers.openai.mapper import to_responses_payload
+
+    payload = to_responses_payload(ModelRequest(messages=[
+        Message(role="system", content="Base."),
+        Message(role="user", content="hola"),
+        Message(role="assistant", content="candidato"),
+        Message(role="developer", content="Corrige el formato."),  # e.g. guardrail retry
+    ]), "gpt-test")
+    assert payload["instructions"] == "Base."
+    assert payload["input"][-1] == {"role": "developer", "content": [{"type": "input_text", "text": "Corrige el formato."}]}

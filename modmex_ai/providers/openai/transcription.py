@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import base64
 import json
 import os
@@ -100,6 +99,7 @@ class OpenAIRealtimeTranscriptionProvider(LiveSpeechToTextProvider):
         *,
         context: RunContext,
     ) -> AsyncIterator[Transcription]:
+        import asyncio
         session = await self.connect()
         producer: asyncio.Task[None] | None = None
         try:

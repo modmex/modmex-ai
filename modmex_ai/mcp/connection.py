@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 
 from modmex_ai.http.async_client import AsyncHttpClient
 from modmex_ai.mcp.client import MCPClient
@@ -101,6 +100,7 @@ class MCPClientManager:
         self.active_connections: list[MCPClientConnection] = []
 
     async def connect(self) -> list[MCPClientConnection]:
+        import asyncio
         tasks = [asyncio.create_task(connection.connect()) for connection in self.connections]
         try:
             await asyncio.gather(*tasks)

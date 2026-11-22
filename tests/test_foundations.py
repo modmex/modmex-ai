@@ -158,3 +158,56 @@ def test_flow_state_store_and_eval_failure_paths_are_durable_and_descriptive():
     assert len(result.failures) == 3
     with pytest.raises(ValueError):
         runner.replay(type("Result", (), {"flow_result": None})())
+
+
+def test_completed_state_keeps_the_approved_tool_output():
+    class Policy(ApprovalPolicy):
+        def verify(self, request, decision):
+            return True
+
+    @tool(requires_approval=True)
+    def send(value: str):
+        return {"sent": value}
+
+    agent = Agent(name="assistant", instructions="Help.", tools=[send], model=FakeModel([
+        ModelResponse(tool_calls=[ToolCall(tool_call_id="call-1", name="send", arguments={"value": "ok"})]),
+        "Delivered.",
+    ]))
+    flow = Flow(name="approval-flow", entrypoint=agent, agents=[])
+    with pytest.raises(FlowSuspended) as error:
+        flow.run("send it", flow_instance_id="flow-1")
+    suspended = error.value.state
+    result = flow.resume(
+        suspended,
+        ApprovalDecision(request_id="call-1", decision=ApprovalDecisionType.APPROVED, signature="x"),
+        approval_policy=Policy(),
+    )
+
+    items = flow.completed_state(suspended, result).session_snapshot.items
+    assert [item.type for item in items] == ["message", "function_call", "function_call_output", "message"]
+    assert items[2].tool_call_id == "call-1" and items[2].output == {"sent": "ok"}
+
+
+@pytest.mark.parametrize("mode", ["run", "run_stream"])
+def test_suspension_identity_is_kept_in_every_mode(mode):
+    @tool(requires_approval=True)
+    def send(value: str):
+        return {"sent": value}
+
+    def suspend(**kwargs):
+        agent = Agent(name="assistant", instructions="Help.", tools=[send], model=FakeModel([
+            ModelResponse(tool_calls=[ToolCall(tool_call_id="call-1", name="send", arguments={"value": "ok"})]),
+        ]))
+        flow = Flow(name="approval-flow", entrypoint=agent, agents=[])
+        with pytest.raises(FlowSuspended) as error:
+            result = getattr(flow, mode)("send it", **kwargs)
+            if mode == "run_stream":
+                list(result)
+        return error.value.state
+
+    state = suspend(flow_instance_id="flow-7", idempotency_key="msg-7", ttl=123)
+    assert (state.flow_instance_id, state.idempotency_key, state.ttl) == ("flow-7", "msg-7", 123)
+
+    first, second = suspend(), suspend()
+    assert first.flow_instance_id != second.flow_instance_id
+    assert first.flow_instance_id.startswith("approval-flow-")

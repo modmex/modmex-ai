@@ -25,6 +25,8 @@ class SessionItem(BaseModel):
     name: str | None = None
     arguments: dict[str, Any] | str | None = None
     output: Any = None
+    # Opaque provider payload replayed verbatim by the adapter that produced it.
+    provider_data: dict[str, Any] | None = None
 
     @classmethod
     def from_message(cls, message: Message) -> "SessionItem":

@@ -13,7 +13,8 @@ call tools, hand off work, and return a controlled result. It fits equally well
 in HTTP APIs, CLIs, background workers, WebSocket servers, notebooks, desktop
 applications, voice systems, and event-driven/serverless workloads.
 
-Its core has no provider SDK dependency. OpenAI is the first complete adapter;
+Its core has no provider SDK dependency. OpenAI and Anthropic (Claude) text
+adapters ship in the box, both on the built-in zero-dependency HTTP transport;
 the core contracts remain reusable for another text, speech, or realtime
 provider.
 
@@ -83,6 +84,76 @@ output. A handoff defaults to transfer_to_agent_name; its typed input is
 validated and delivered to an on_handoff callback before the next agent
 continues with the conversation.
 
+## Anthropic (Claude)
+
+`AnthropicMessagesModel` calls `POST /v1/messages` through the same
+zero-dependency transport as the OpenAI adapters, so it adds no packages to a
+Lambda bundle. `api_key` defaults to the `ANTHROPIC_API_KEY` environment
+variable.
+
+```python
+from modmex_ai import Agent, AnthropicSettings, ModelSettings, tool
+from modmex_ai.providers.anthropic import AnthropicMessagesModel
+
+
+@tool
+def get_weather(city: str) -> dict:
+    """Get the current weather for a city."""
+    return {"city": city, "temp_c": 21}
+
+
+agent = Agent(
+    name="weather",
+    instructions="Answer weather questions using the tool.",
+    tools=[get_weather],
+    model=AnthropicMessagesModel("claude-opus-5-5"),
+    settings=ModelSettings(
+        reasoning_effort="high",   # output_config.effort: low|medium|high|xhigh|max
+        anthropic=AnthropicSettings(
+            cache_ttl="5m",        # automatic prompt caching ("5m" or "1h")
+            fallbacks="default",   # server-side fallback if the model declines
+        ),
+    ),
+)
+result = agent.run("What's the weather in Paris?")
+```
+
+How the provider-neutral contracts map to the Messages API:
+
+| modmex-ai | Anthropic |
+|---|---|
+| Leading `system`/`developer` messages | top-level `system` |
+| Later `system`/`developer` messages | mid-conversation `role: "system"` message where the API accepts one, otherwise user text |
+| `function_call` / `function_call_output` items | `tool_use` / `tool_result` blocks (parallel results grouped in one user turn) |
+| `output_type` / `output_schema` | `output_config.format` (JSON schema) |
+| `ModelSettings.reasoning_effort` | `output_config.effort` |
+| `ModelSettings.max_tokens` | `max_tokens` (defaults: 16000, or 64000 when streaming) |
+| `ModelSettings.parallel_tool_calls=False` | `tool_choice: {type: "auto", disable_parallel_tool_use: true}` |
+| `Usage.input_tokens` / `cached_input_tokens` | uncached + cache read + cache write / cache read |
+| `stop_reason: "refusal"` | raises `ModelRefusalError` (so a `FallbackModel` moves on) |
+
+Notes:
+
+- **Thinking blocks are replayed verbatim.** Current Claude models always
+  think, and a tool-use turn must be sent back exactly as it was produced. The
+  adapter stores that turn's content in `ToolCall.provider_data`; the runner
+  copies it to the `function_call` `SessionItem`, and it survives session
+  snapshots and approval checkpoints. Each replayed turn also records a
+  fingerprint of the `system` prompt and tool set it was produced with; if a
+  `tool_selector` changes the tools or a handoff moves the history to an agent
+  with other instructions, the now-invalid thinking blocks are dropped
+  automatically (as a leading run, which the API accepts) while text and tool
+  calls stay. With stable tools and instructions nothing is dropped. Don't edit
+  or remove items from the middle of a session's history yourself.
+- `temperature` and `top_p` raise `ValueError`: API version `2026-10-21`
+  rejects sampling parameters on every model.
+- The Messages API is stateless: `ProviderState` with a remote
+  `previous_response_id`/`conversation_id` is rejected.
+- The default transport retries `529 overloaded` on top of the usual status
+  codes and uses a 300 s timeout, which is still capped by the remaining
+  execution budget.
+- Streaming (`run_stream`) is recommended for long or tool-heavy turns.
+
 ## Multimodal inputs
 
 Messages can combine typed text, document, and image parts without exposing a
@@ -124,6 +195,38 @@ print(response.output_text)
 `OpenAIChatModel` deliberately rejects `FileInput` and `ImageInput` until that
 adapter implements their distinct wire format. Use `OpenAIResponsesModel` for
 multimodal input.
+
+## Per-turn context
+
+Context that is true *now* — the customer's open quotes, the current load status,
+today's date — should not be part of the stored conversation: stored once per turn,
+it accumulates, and the model sees several conflicting versions (and may call tools
+again to find out which is current). Pass it as `turn_context`:
+
+```python
+result = flow.run(
+    whatsapp_message,
+    session=session,
+    turn_context=f"Cliente: {customer}. Cotizaciones abiertas: {open_quotes}.",
+)
+```
+
+- It is sent with this turn only, after the turn's input, and never written to the
+  session: the model always sees exactly one, current copy.
+- The agent's instructions and the stored history stay byte-identical between
+  turns, so prompt caching keeps working (it is not merged into OpenAI
+  `instructions`; with Claude it is a native mid-conversation system message).
+- A string is sent as a developer message; a list of messages is sent as given.
+- Handoff targets in the same turn receive it too.
+- It is not stored in a suspended (approval) state; pass the current context again
+  to `Flow.resume(..., turn_context=...)`.
+- It requires stateless mode: with server-side conversation state
+  (`previous_response_id` / `conversation_id`) the provider would store it, so it
+  raises `ValueError`.
+
+Only leading system/developer messages go to OpenAI Responses `instructions`; later
+ones are sent in place, so mid-conversation instructions (including output-guardrail
+retries) no longer rewrite the cached prefix.
 
 ## Durable sessions and approvals
 
@@ -276,8 +379,34 @@ serialize an `InMemorySession` and later restore it with
 `snapshot.to_memory_session()`.
 
 `ChainedVoiceSession.process_audio_stream()` supports providers that implement
-streaming STT and TTS contracts. It emits transcript deltas, waits for a final
-transcript before invoking the text flow, then yields playable audio chunks.
+streaming STT and TTS contracts. It emits transcript deltas and waits for a final
+transcript before invoking the text flow.
+
+When every agent's model streams natively (`astream`, as the OpenAI and Anthropic
+adapters do), the reply is spoken **while it is generated**: model text is split
+into sentences and each one is synthesized as soon as it is complete, while the
+model keeps writing the next. The caller hears the first sentence instead of
+waiting for the whole reply, which matters most with thinking models. Text a model
+writes before calling a tool ("Let me check your load.") is spoken while the tool
+runs. Agents with structured output (`output_type`) or output guardrails are not
+spoken early, since their text is not speakable or could still be rejected; their
+final reply is synthesized when the turn completes, as before. Turn off with
+`VoiceTurnOptions(speak_while_generating=False)`.
+`VoiceTurnMetrics.first_audio_latency_ms` reports time to the first audio chunk.
+Each sentence is a separate TTS request, so use a raw, concatenable audio format
+for playback (e.g. `OpenAISpeechProvider(response_format="pcm")`); container
+formats such as WAV or MP3 repeat their header per sentence. To use a
+request-based STT such as `OpenAITranscriptionProvider` here, wrap it in
+`BufferedStreamingSpeechToText`.
+A turn cancelled mid-reply is not saved to the session. Write tools used in voice
+turns as `async def` (or offload blocking I/O to a thread): a synchronous, blocking
+tool stalls the event loop, so the sentence spoken before it cannot play meanwhile.
+
+Claude has no speech-to-speech, STT or TTS API; use it as the reasoning step of a
+chained session with any STT/TTS provider. For voice, keep `reasoning_effort`
+low and consider the instruction "Latency-sensitive; begin your visible answer
+immediately." so the model starts speaking sooner.
+
 The callable adapters make it possible to plug in a provider-specific function
 without making that provider a dependency of `modmex-ai`.
 
@@ -462,10 +591,10 @@ from modmex_ai import ContextCompactor, CompactionSnapshot, execution_budget
 
 compactor = ContextCompactor(
     model=summary_model,  # Host chooses the model and credentials.
-    threshold=24_000,     # Serialized UTF-8 bytes by default, not tokens.
+    threshold=60_000,     # Estimated tokens (default measure: TokenEstimator).
     keep_recent_turns=4,
-    max_input_size=32_000,
-    max_summary_bytes=6_000,
+    max_input_size=80_000,  # Tokens sent to the summarizer per batch.
+    max_summary_bytes=16_000,
     preservation_instructions="Preserve load IDs, assignments and unresolved requests.",
 )
 with execution_budget(25):  # Shared budget for compaction AND the ensuing agent run.
@@ -475,6 +604,27 @@ with execution_budget(25):  # Shared budget for compaction AND the ensuing agent
     # If still over your allowed budget, apply an explicit host policy before executing.
     response = await agent.run_async(result.messages)
 ```
+
+### Measuring in tokens without a tokenizer
+
+Sizes are tokens estimated by a `TokenEstimator` (the default `measure`). It needs
+no tokenizer dependency and makes no extra API calls: it starts at ~4 bytes per
+token and calibrates itself from the input tokens your provider actually billed for
+each request in a run's trace.
+
+```python
+result = compactor.compact(full_history, previous=saved_snapshot)
+response = agent.run(result.messages)
+compactor.measure.observe_trace(response.trace)   # learn the real bytes/token ratio
+saved_ratio = compactor.measure.bytes_per_token   # persist across cold starts and pass
+# ContextCompactor(..., measure=TokenEstimator(bytes_per_token=saved_ratio)) next time
+```
+
+Samples that cannot be a real per-request ratio (for example server-side conversation
+state, where only new messages are sent but the whole conversation is billed) are
+ignored. The ratio is fixed during a `compact` call, so the measure stays deterministic.
+Pass `measure=context_bytes` (and byte thresholds) to budget in serialized bytes, or
+any deterministic, monotonic counter of your own.
 
 Pass the full, append-only history every time, together with the last successful
 CompactionSnapshot (serializable with model_dump()). The snapshot stores summary,
@@ -496,13 +646,21 @@ A single bounded batch is compacted per call. Large turns are not truncated to f
 summarizer. Results report unchanged, compacted, blocked or failed, sizes, duration,
 usage and a safe reason. A compacted result can still exceed the threshold: the host
 must check after_size and choose whether to compact again, defer or reject execution.
-Supply a deterministic, monotonic measure=your_token_counter and thresholds in matching units for token budgets;
-max_summary_bytes remains a byte cap. Empty, oversized, or non-reducing summaries never
+max_summary_bytes is always a byte cap, whatever the measure. Empty, oversized, or non-reducing summaries never
 replace the old snapshot. Provider failures retain the previous effective context and
 unsummarized messages; cancellation and RunTimeoutError propagate. Usage from completed
 summarizer responses is reported even if the summary is rejected. Failed provider calls
 may incur usage unavailable to the library. Summarization is lossy: critical authorization
 and transaction state must always be reloaded from authoritative application data.
+
+Provider continuation data (`SessionItem.provider_data`, e.g. Anthropic's signed
+thinking blocks) is bound to the original conversation prefix. Once a summary replaces
+older turns, the compacted view drops it from every completed retained turn (an
+unfinished tool round keeps it), and it is never sent to the summarizer. A summary that
+stops at `max_tokens` is rejected as `summary_truncated` instead of silently losing
+history. Thinking models (Claude, OpenAI reasoning models) spend part of `max_tokens`
+on reasoning; the default summarizer `max_tokens` is 8000. For a cheaper summary,
+add `reasoning_effort="low"` where the summarizer model supports it.
 
 The compactor does not change provider_state or server-managed conversations. Hosts
 must rebuild/clear incompatible provider state when replacing raw history with a summary;
@@ -568,7 +726,7 @@ Use conservative selection, since changing the schema prefix can reduce cache re
 Tool schemas are built once per execution, not fetched/rebuilt on every inference.
 
 `Agent.parallel_tool_calls` controls local async concurrency (default False).
-`ModelSettings.parallel_tool_calls` independently controls whether OpenAI may propose
+`ModelSettings.parallel_tool_calls` independently controls whether the model may propose
 parallel calls (omitted by default). Neither flag proves tool independence; only enable
 local parallelism when the host knows those operations can safely overlap.
 

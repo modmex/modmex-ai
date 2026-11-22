@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import asyncio
 import importlib.util
 from collections.abc import AsyncIterator
 from typing import Any
 
 from modmex_ai.errors import (
     ModelTimeoutError,
+    ProviderConnectionError,
     ProviderError,
     RateLimitError,
     RunTimeoutError,
@@ -32,6 +32,7 @@ class AsyncHttpClient:
         self._client = client
         self._owns_client = client is None if own_client is None else own_client
         self._closed = False
+        self._loop: Any = None
 
     @staticmethod
     def is_available() -> bool:
@@ -68,6 +69,7 @@ class AsyncHttpClient:
         data: dict[str, Any] | None = None,
         timeout: float | None = None,
         raise_for_status: bool = True,
+        retry: RetryConfig | None = None,
     ) -> HttpResponse:
         async for response in self._post(
             url,
@@ -76,6 +78,7 @@ class AsyncHttpClient:
             timeout=timeout,
             stream=False,
             raise_for_status=raise_for_status,
+            retry=retry,
         ):
             return response
         raise AssertionError("Async HTTP request did not return a response")
@@ -88,6 +91,7 @@ class AsyncHttpClient:
         data: dict[str, Any] | None = None,
         chunk_size: int = 8_192,
         timeout: float | None = None,
+        retry: RetryConfig | None = None,
     ) -> AsyncIterator[bytes]:
         async for response in self._post(
             url,
@@ -95,6 +99,7 @@ class AsyncHttpClient:
             data=data,
             timeout=timeout,
             stream=True,
+            retry=retry,
         ):
             async for chunk in response.aiter_bytes(chunk_size=chunk_size):
                 if chunk:
@@ -109,10 +114,13 @@ class AsyncHttpClient:
         timeout: float | None,
         stream: bool,
         raise_for_status: bool = True,
+        retry: RetryConfig | None = None,
     ) -> AsyncIterator[Any]:
+        import asyncio
+        policy = retry or self.retry
         client = await self._get_client()
         emitted = False
-        for attempt in range(self.retry.attempts + 1):
+        for attempt in range(policy.attempts + 1):
             try:
                 if stream:
                     async with client.stream(
@@ -156,7 +164,7 @@ class AsyncHttpClient:
                 raise
             except Exception as error:
                 provider_error = _provider_error(error)
-                delay = None if emitted else self.retry.delay(provider_error, attempt)
+                delay = None if emitted else policy.delay(provider_error, attempt)
                 if delay is None:
                     raise provider_error
                 await bounded_await(asyncio.sleep(delay))
@@ -164,8 +172,20 @@ class AsyncHttpClient:
     async def _get_client(self) -> Any:
         if self._closed:
             raise RuntimeError("Async HTTP client is closed")
+        import asyncio
+
+        loop = asyncio.get_running_loop()
+        if self._client is not None and self._loop is None:
+            self._loop = loop  # an injected client adopts the first loop that uses it
+        if self._client is not None and self._owns_client and self._loop is not loop:
+            # An httpx pool is bound to the loop that created it. Serverless async
+            # handlers usually run each invocation in a new loop (asyncio.run), so
+            # a pooled client from a previous, closed loop fails intermittently
+            # with "Event loop is closed". Its loop is gone; just drop it.
+            self._client = None
         if self._client is None:
             self._client = _httpx().AsyncClient(timeout=self.timeout)
+            self._loop = loop
         return self._client
 
 
@@ -197,5 +217,10 @@ def _provider_error(error: Exception) -> ProviderError:
             or response.headers.get("request-id"),
             response_body=body,
             headers=dict(response.headers),
+        )
+    if isinstance(error, (httpx.TransportError, ConnectionError)):
+        return ProviderConnectionError(
+            str(error) or type(error).__name__,
+            request_sent=not isinstance(error, httpx.ConnectError),
         )
     return ProviderError(str(error))

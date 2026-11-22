@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Callable
 
-from modmex_ai.errors import ProviderError
+from modmex_ai.errors import ProviderConnectionError, ProviderError
 from modmex_ai.budget import remaining_seconds
 
 
@@ -19,6 +19,7 @@ class RetryConfig:
         status_codes: set[int] | None = None,
         jitter_seconds: float = 0.0,
         on_retry: Callable[[dict], None] | None = None,
+        retry_sent_requests: bool = True,
     ) -> None:
         if attempts < 0 or not isinstance(attempts, int):
             raise ValueError("attempts must be a non-negative integer")
@@ -36,6 +37,9 @@ class RetryConfig:
         )
         self.jitter_seconds = jitter_seconds
         self.on_retry = on_retry
+        # False for non-idempotent operations: a connection that failed after the
+        # request was sent may already have produced the side effect.
+        self.retry_sent_requests = retry_sent_requests
 
     def delay(self, error: ProviderError, attempt: int) -> float | None:
         """Return a safe retry delay, or None when the request must stop."""
@@ -46,7 +50,11 @@ class RetryConfig:
             for key in ("code", "type")
         ):
             return None
-        if error.status_code not in self.status_codes or attempt >= self.attempts:
+        if isinstance(error, ProviderConnectionError):
+            retryable = self.retry_sent_requests or not error.request_sent
+        else:
+            retryable = error.status_code in self.status_codes
+        if not retryable or attempt >= self.attempts:
             return None
         delay = self.backoff_seconds * (2**attempt)
         value = next(

@@ -10,10 +10,14 @@ class ConditionalFailure(Exception):
 
 
 class MemoryConnector:
+    """Evaluates the two condition shapes the store emits, like DynamoDB would."""
+
     def __init__(self):
         self.items = {}
+        self.gets = 0
 
     def get(self, params):
+        self.gets += 1
         key = tuple(params["Key"].values())
         return {"Item": self.items[key]} if key in self.items else {}
 
@@ -21,10 +25,18 @@ class MemoryConnector:
         item = params["Item"]
         key = (item["pk"], item["sk"])
         current = self.items.get(key)
-        expected = params["ExpressionAttributeValues"][":expected_revision"]
-        if current is not None and current["revision"] != expected:
-            raise ConditionalFailure()
-        if current is None and expected != 0:
+        condition = params["ConditionExpression"]
+        names = params["ExpressionAttributeNames"]
+        values = params.get("ExpressionAttributeValues", {})
+        # DynamoDB rejects unused expression names/values.
+        assert all(name in condition for name in names) and all(v in condition for v in values)
+        if condition == "attribute_not_exists(#pk)":
+            ok = current is None
+        elif condition == "#revision = :expected_revision":
+            ok = current is not None and current["revision"] == values[":expected_revision"]
+        else:
+            raise AssertionError(condition)
+        if not ok:
             raise ConditionalFailure()
         self.items[key] = item
         return {}
@@ -56,3 +68,17 @@ def test_flow_state_store_preserves_idempotency_and_compare_and_swap():
     assert store.load("flow-1").idempotency_key == "message-1"
     with pytest.raises(FlowStateConflictError):
         store.save(PersistedFlowState(flow_instance_id="flow-1"), expected_revision=0)
+
+
+def test_save_does_not_read_before_write_and_rejects_missing_items():
+    connector = MemoryConnector()
+    store = DynamoDbDurableSessionStore(connector)
+    store.save(SessionSnapshot(session_id="s"), expected_revision=0)
+    store.save(SessionSnapshot(session_id="s"), expected_revision=1)
+    assert connector.gets == 0
+
+    connector.items.clear()  # e.g. removed by TTL between turns
+    with pytest.raises(SessionConflictError):
+        store.save(SessionSnapshot(session_id="s"), expected_revision=2)
+    with pytest.raises(ValueError):
+        store.save(SessionSnapshot(session_id="s"), expected_revision=-1)

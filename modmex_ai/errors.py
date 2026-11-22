@@ -23,6 +23,28 @@ class RateLimitError(ProviderError):
     pass
 
 
+class ProviderConnectionError(ProviderError):
+    """The request never got an HTTP response (connection reset, DNS, TLS...).
+
+    ``request_sent`` is False only when the failure happened before the request
+    could reach the server (e.g. connection refused, DNS), so retrying cannot
+    repeat a side effect. Model calls retry both cases; non-idempotent calls
+    such as MCP ``tools/call`` retry only unsent requests.
+    """
+
+    def __init__(self, message: str, *, request_sent: bool = True, **kwargs) -> None:
+        super().__init__(message, **kwargs)
+        self.request_sent = request_sent
+
+
+class ModelRefusalError(ProviderError):
+    """The model declined the request (e.g. Anthropic ``stop_reason: refusal``)."""
+
+    def __init__(self, message: str, *, stop_details: object | None = None, **kwargs) -> None:
+        super().__init__(message, **kwargs)
+        self.stop_details = stop_details
+
+
 class ModelTimeoutError(ProviderError):
     pass
 

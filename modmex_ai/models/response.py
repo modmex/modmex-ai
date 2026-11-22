@@ -13,6 +13,9 @@ class ToolCall(BaseModel):
     tool_call_id: str
     name: str
     arguments: dict[str, Any] | str
+    # Opaque provider payload that must be replayed verbatim (e.g. Anthropic
+    # thinking blocks that accompany a tool_use turn). Adapters own its shape.
+    provider_data: dict[str, Any] | None = None
 
 
 class ModelResponse(BaseModel):
@@ -28,6 +31,7 @@ class ModelResponse(BaseModel):
     provider_state: ProviderState | None = None
     latency_ms: float | None = None
     compaction_count: int = 0
+    stop_reason: str | None = None
 
     @property
     def has_tool_calls(self) -> bool:

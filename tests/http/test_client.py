@@ -135,14 +135,50 @@ def test_http_client_maps_http_error_with_text_body(monkeypatch):
     assert exc.value.response_body == "not-json"
 
 
-def test_http_client_maps_url_error(monkeypatch):
+def test_http_client_retries_connection_errors(monkeypatch):
+    from modmex_ai.errors import ProviderConnectionError
+    from modmex_ai.http import RetryConfig
+
+    attempts = []
+
     def urlopen(_request, timeout):
+        attempts.append(1)
         raise urllib.error.URLError("no route")
 
     monkeypatch.setattr("urllib.request.urlopen", urlopen)
 
-    with pytest.raises(ProviderError):
-        HttpClient().post_json("https://example.test")
+    with pytest.raises(ProviderConnectionError):
+        HttpClient(retry=RetryConfig(attempts=2, backoff_seconds=0)).post_json("https://example.test")
+    assert len(attempts) == 3
+
+
+def test_http_client_does_not_retry_connect_timeouts(monkeypatch):
+    from modmex_ai.errors import ModelTimeoutError
+    from modmex_ai.http import RetryConfig
+
+    attempts = []
+
+    def urlopen(_request, timeout):
+        attempts.append(1)
+        raise urllib.error.URLError(TimeoutError("timed out"))
+
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+
+    with pytest.raises(ModelTimeoutError):
+        HttpClient(retry=RetryConfig(attempts=2, backoff_seconds=0)).post_json("https://example.test")
+    assert len(attempts) == 1
+
+
+def test_http_client_retries_reset_while_reading(monkeypatch):
+    from modmex_ai.errors import ProviderConnectionError
+    from modmex_ai.http import RetryConfig
+
+    def urlopen(_request, timeout):
+        raise ConnectionResetError(54, "Connection reset by peer")
+
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    with pytest.raises(ProviderConnectionError):
+        HttpClient(retry=RetryConfig(attempts=1, backoff_seconds=0)).post_json("https://example.test")
 
 
 def test_http_client_builds_multipart_requests(monkeypatch):
@@ -412,3 +448,44 @@ def test_http_stream_maps_timeout_url_error_and_non_json_http_error(monkeypatch)
     monkeypatch.setattr("urllib.request.urlopen", lambda *_args, **_kwargs: (_ for _ in ()).throw(urllib.error.URLError("offline")))
     with pytest.raises(ProviderError, match="offline"):
         list(client.post_json_stream("https://example.test"))
+
+
+def test_async_http_client_recreates_owned_transport_on_a_new_event_loop(monkeypatch):
+    import modmex_ai.http.async_client as module
+
+    created = []
+
+    class Response:
+        status_code = 200
+        headers = {}
+        content = b'{"ok":true}'
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"ok": True}
+
+    class FakeAsyncClient:
+        def __init__(self, timeout):
+            created.append(self)
+
+        async def post(self, url, **kwargs):
+            return Response()
+
+        async def aclose(self):
+            pass
+
+    class FakeHttpx:
+        AsyncClient = FakeAsyncClient
+
+    monkeypatch.setattr(module, "_httpx", lambda: FakeHttpx)
+    client = AsyncHttpClient()
+
+    async def call():
+        await client.post_json("https://example.test/a")
+        await client.post_json("https://example.test/b")
+
+    asyncio.run(call())  # invocation 1: one pooled client, reused within the loop
+    asyncio.run(call())  # invocation 2: new loop -> new pooled client
+    assert len(created) == 2

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import math
 from modmex_ai.budget import execution_budget, bounded_await
@@ -152,6 +151,10 @@ class Agent:
         with execution_budget(self.execution_timeout):
             return await bounded_await(self._run_async(input, **kwargs))
 
+    async def arun(self, input: Any, **kwargs: Any) -> AgentResult:
+        """Async run; same as :meth:`run_async`, named like ``arun_stream``/``Tool.arun``."""
+        return await self.run_async(input, **kwargs)
+
     def run_stream(self, input: Any, **kwargs: Any):
         with execution_budget(self.execution_timeout):
             yield from self._run_stream(input, **kwargs)
@@ -171,6 +174,7 @@ class Agent:
         return self._run_execution(self._execution(input, **kwargs))
 
     async def _run_async(self, input: Any, **kwargs: Any) -> AgentResult:
+        import asyncio
         await self._prepare_mcp_clients()
         execution = self._execution(input, **kwargs)
         acomplete = getattr(execution.model, "acomplete", None)
@@ -242,6 +246,7 @@ class Agent:
 
     async def _arun_stream(self, input: Any, **kwargs: Any):
         """Async counterpart of ``run_stream`` for models with native streaming."""
+        import asyncio
         await self._prepare_mcp_clients()
         execution = self._execution(input, **kwargs)
         astream = getattr(execution.model, "astream", None)
@@ -297,6 +302,7 @@ class Agent:
                     yield event
 
     async def _tool_events(self, execution, tool_call, *, streaming):
+        import asyncio
         yield AgentStreamEvent(
             type=AgentStreamEventType.TOOL_CALL_DELTA, tool_call=tool_call
         )
@@ -339,6 +345,7 @@ class Agent:
         )
 
     async def _execute_tool_events(self, execution, calls, *, streaming):
+        import asyncio
         results = {}
 
         def accept(event):
@@ -410,6 +417,7 @@ class Agent:
                 )
 
     async def _prepare_mcp_clients(self) -> None:
+        import asyncio
         tasks = [
             asyncio.create_task(client.connect())
             for client in self.mcp_clients
@@ -421,17 +429,7 @@ class Agent:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
-        for client in self.mcp_clients:
-            attached = self._mcp_tool_names.setdefault(id(client), set())
-            for remote_tool in client.tools:
-                if remote_tool.name in attached:
-                    continue
-                if any(tool.name == remote_tool.name for tool in self.tools):
-                    raise ValueError(
-                        f"Duplicate tool name from MCP client: {remote_tool.name}"
-                    )
-                self.tools.append(remote_tool)
-                attached.add(remote_tool.name)
+        self._sync_mcp_tools()
 
     def _ensure_mcp_clients_connected(self) -> None:
         for client in self.mcp_clients:
@@ -440,16 +438,35 @@ class Agent:
                     "Synchronous Agent execution requires connected MCP clients; "
                     "use await agent.run_async(...) or await client.connect() first"
                 )
+        self._sync_mcp_tools()
+
+    def _sync_mcp_tools(self) -> None:
+        """Mirror each connected MCP client's current catalog into ``self.tools``.
+
+        Tools a server no longer lists are removed, and refreshed definitions
+        replace stale ones, so the model is never offered a tool that is gone.
+        """
+        for client in self.mcp_clients:
             attached = self._mcp_tool_names.setdefault(id(client), set())
-            for remote_tool in client.tools:
-                if remote_tool.name in attached:
-                    continue
-                if any(tool.name == remote_tool.name for tool in self.tools):
-                    raise ValueError(
-                        f"Duplicate tool name from MCP client: {remote_tool.name}"
-                    )
-                self.tools.append(remote_tool)
-                attached.add(remote_tool.name)
+            current = {tool.name: tool for tool in client.tools}
+            self.tools = [
+                tool
+                for tool in self.tools
+                if not (tool.name in attached and tool.name not in current)
+            ]
+            for name, remote_tool in current.items():
+                existing = next(
+                    (index for index, tool in enumerate(self.tools) if tool.name == name),
+                    None,
+                )
+                if existing is None:
+                    self.tools.append(remote_tool)
+                elif name in attached:
+                    self.tools[existing] = remote_tool
+                else:
+                    raise ValueError(f"Duplicate tool name from MCP client: {name}")
+            attached.clear()
+            attached.update(current)
 
     def _execution(
         self,

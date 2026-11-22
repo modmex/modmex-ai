@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from contextvars import ContextVar
 import inspect
 import json
@@ -84,6 +83,7 @@ class Tool:
         return function_schema(self.name, self.description, parameters, required)
 
     def run(self, arguments: dict[str, Any] | str, *, context: Any = None) -> Any:
+        import asyncio
         try:
             kwargs = self._prepare_arguments(arguments, context=context)
             self._require_approval(kwargs, context=context)

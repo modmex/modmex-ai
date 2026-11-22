@@ -106,7 +106,14 @@ def test_session_snapshot_restores_memory_history():
             "name": None,
             "arguments": None,
             "output": None,
+            "provider_data": None,
         }],
     }
     assert restored.id == original.id
     assert restored.get_items() == original.get_items()
+
+
+def test_session_item_without_provider_data_still_loads():
+    legacy = {"type": "function_call", "tool_call_id": "t1", "name": "a", "arguments": "{}", "output": None}
+    item = SessionItem(**legacy)
+    assert item.provider_data is None

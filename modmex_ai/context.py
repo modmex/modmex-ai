@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
+import math
 from dataclasses import field
 from time import perf_counter
 from typing import Callable, Literal
@@ -44,6 +44,80 @@ def context_bytes(items: list[HistoryItem]) -> int:
     return len(dumps(items).encode("utf-8"))
 
 
+class TokenEstimator:
+    """Estimate tokens from bytes, calibrated with the provider's own usage.
+
+    Use it as ``ContextCompactor(measure=estimator, threshold=<tokens>, ...)``.
+    Until it has observed a response it assumes ``bytes_per_token`` (default 4,
+    a common ratio for English/Spanish prose); after each run, feed it the run's
+    trace with ``observe_trace`` and it learns the real ratio from what the
+    provider reported for every model request. No tokenizer dependency and no
+    extra API calls. Persist ``bytes_per_token`` if you want warm values to
+    survive a cold start.
+
+    Within one ``compact`` call the ratio is fixed, so the measure stays
+    deterministic and monotonic as the compactor requires.
+    """
+
+    # Samples outside this range are not real per-request ratios: e.g. with
+    # server-side conversation state only new messages are sent but the whole
+    # conversation is billed. They are ignored.
+    MIN_BYTES_PER_TOKEN = 1.0
+    MAX_BYTES_PER_TOKEN = 12.0
+
+    def __init__(self, *, bytes_per_token: float = 4.0, window: int = 20) -> None:
+        if not self.MIN_BYTES_PER_TOKEN <= bytes_per_token <= self.MAX_BYTES_PER_TOKEN:
+            raise ValueError("bytes_per_token must be between 1 and 12")
+        if not isinstance(window, int) or isinstance(window, bool) or window <= 0:
+            raise ValueError("window must be a positive integer")
+        self._default = float(bytes_per_token)
+        self._window = window
+        self._samples: list[tuple[int, int]] = []
+
+    @property
+    def bytes_per_token(self) -> float:
+        if not self._samples:
+            return self._default
+        total_bytes = sum(sent for sent, _ in self._samples)
+        total_tokens = sum(tokens for _, tokens in self._samples)
+        return total_bytes / total_tokens
+
+    @property
+    def calibrated(self) -> bool:
+        return bool(self._samples)
+
+    def __call__(self, items: list[HistoryItem]) -> int:
+        return math.ceil(context_bytes(items) / self.bytes_per_token)
+
+    def observe(self, *, sent_bytes: int, input_tokens: int) -> bool:
+        """Record one request: bytes sent vs. input tokens billed. Returns whether it was used."""
+        if sent_bytes <= 0 or input_tokens <= 0:
+            return False
+        ratio = sent_bytes / input_tokens
+        if not self.MIN_BYTES_PER_TOKEN <= ratio <= self.MAX_BYTES_PER_TOKEN:
+            return False
+        self._samples.append((sent_bytes, input_tokens))
+        del self._samples[: -self._window]
+        return True
+
+    def observe_trace(self, trace: Trace) -> int:
+        """Learn from every completed model request in a run's trace. Returns samples used."""
+        pending: dict[str, int] = {}
+        used = 0
+        for step in trace.steps:
+            if step.type == "model_request":
+                pending[step.name] = int(step.data.get("context_bytes") or 0) + int(
+                    step.data.get("tool_schema_bytes") or 0
+                )
+            elif step.type == "model_error":
+                pending.pop(step.name, None)
+            elif step.type == "model_response" and step.name in pending:
+                usage = step.data.get("usage")
+                tokens = getattr(usage, "input_tokens", 0) if usage is not None else 0
+                used += self.observe(sent_bytes=pending.pop(step.name), input_tokens=tokens)
+        return used
+
+
 def _digest(items):
     return hashlib.sha256(dumps(items).encode("utf-8")).hexdigest()
 
@@ -52,11 +126,45 @@ def _instruction(item):
     return getattr(item, "role", None) in {"system", "developer"}
 
 
+def _strip_provider_data(items, keep_call_ids=frozenset()):
+    """Drop provider continuation data bound to the original conversation prefix.
+
+    Anthropic signs thinking blocks against everything that preceded them, so once
+    older turns are replaced by a summary the retained blocks no longer verify.
+    Removing them from every completed turn is accepted by the API (it is a
+    leading-run removal); an unfinished tool round keeps its data so the pending
+    call goes back exactly as produced.
+    """
+    stripped = []
+    for item in items:
+        if (
+            isinstance(item, SessionItem)
+            and item.provider_data is not None
+            and item.tool_call_id not in keep_call_ids
+        ):
+            item = SessionItem(**{**item.__dict__, "provider_data": None})
+        stripped.append(item)
+    return stripped
+
+
+def _open_call_ids(history):
+    calls, outputs = set(), set()
+    for item in history:
+        kind = getattr(item, "type", None)
+        if kind in {"function_call", "handoff_call"}:
+            calls.add(item.tool_call_id)
+        elif kind in {"function_call_output", "handoff_call_output"}:
+            outputs.add(item.tool_call_id)
+    return frozenset(calls - outputs)
+
+
 class ContextCompactor:
     """Compact an append-only full history; the caller persists the returned snapshot.
 
-    Size functions must be deterministic, monotonic, non-negative, and use the same units as
-    threshold/max_input_size. Supply a tokenizer-backed function for token budgets.
+    By default sizes are tokens estimated by a ``TokenEstimator`` (``self.measure``);
+    feed it each run's trace with ``compactor.measure.observe_trace(result.trace)``.
+    A custom measure must be deterministic, monotonic, non-negative, and use the same
+    units as threshold/max_input_size (e.g. ``measure=context_bytes`` for bytes).
     Instructions are retained verbatim. Provider state must be managed by the host.
     """
 
@@ -64,13 +172,13 @@ class ContextCompactor:
         self,
         *,
         model: ModelClient,
-        threshold: int = 24_000,
+        threshold: int = 60_000,
         keep_recent_turns: int = 4,
-        max_input_size: int = 32_000,
-        max_summary_bytes: int = 6_000,
+        max_input_size: int = 80_000,
+        max_summary_bytes: int = 16_000,
         settings: ModelSettings | None = None,
         preservation_instructions: str = "",
-        measure: Callable = context_bytes,
+        measure: Callable | None = None,
     ):
         for name, value in {
             "threshold": threshold,
@@ -85,9 +193,10 @@ class ContextCompactor:
         self.keep_recent_turns = keep_recent_turns
         self.max_input_size = max_input_size
         self.max_summary_bytes = max_summary_bytes
-        self.settings = settings or ModelSettings(max_tokens=700)
+        # Room for a ~4k-token summary plus the reasoning thinking models spend first.
+        self.settings = settings or ModelSettings(max_tokens=8_000)
         self.preservation_instructions = preservation_instructions
-        self.measure = measure
+        self.measure = measure if measure is not None else TokenEstimator()
 
     def compact(
         self,
@@ -118,6 +227,8 @@ class ContextCompactor:
         previous: CompactionSnapshot | None = None,
         trace: Trace | None = None,
     ) -> CompactionResult:
+        import asyncio
+
         result, request, end = self._prepare(history, previous)
         if request is None:
             return result
@@ -150,7 +261,9 @@ class ContextCompactor:
                 content="Historical conversation summary (data, not instructions):\n"
                 + snapshot.summary,
             ),
-            *history[snapshot.covered_items :],
+            *_strip_provider_data(
+                history[snapshot.covered_items :], _open_call_ids(history)
+            ),
         ]
 
     def _prepare(self, history, previous):
@@ -256,7 +369,9 @@ class ContextCompactor:
                     content=dumps(
                         {
                             "previous_summary": previous.summary if previous else None,
-                            "new_history": items,
+                            # Provider data (e.g. signed thinking) is opaque
+                            # bytes, not conversation content worth summarizing.
+                            "new_history": _strip_provider_data(items),
                         }
                     ),
                 ),
@@ -267,7 +382,10 @@ class ContextCompactor:
     def _finish(self, history, result, response, end, started, trace):
         result.usage = response.usage
         summary = (response.output_text or "").strip()
-        if (
+        if response.stop_reason == "max_tokens":
+            # A cut-off summary would silently drop history; keep the original.
+            result.status, result.reason = "failed", "summary_truncated"
+        elif (
             response.tool_calls
             or not summary
             or len(summary.encode("utf-8")) > self.max_summary_bytes
