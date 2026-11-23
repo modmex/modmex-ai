@@ -211,12 +211,20 @@ scanned PDFs (e.g. a 20 MB proof of delivery), rendering pages to compressed
 images first is cheaper and works with any model; the models downscale pages
 anyway.
 
+**Model ids.** On `bedrock-runtime` (Converse) many models are served only through
+an inference profile: use the `us.`/`global.` id from the model card's
+*Programmatic access* table, not the bare model id. A bare id that is not offered
+in-Region can come back as `AccessDeniedException: ... is not available for this
+account`.
+
 **Converse notes.**
 
 - Tools (`strict`), structured output, streaming and signed reasoning replay work
   as with the native adapters; whether a given model supports documents, prompt
   caching (`BedrockSettings(cache_ttl=...)`) or structured output depends on its
   model card. Pass `supports_structured_output=False` for models without it.
+- OpenAI models: structured output also sets
+  `additionalModelRequestFields.text.format.strict` (done for you).
 - Model-specific parameters (e.g. reasoning effort) go in
   `BedrockSettings(additional_model_request_fields=...)`;
   `ModelSettings.reasoning_effort` is rejected because each family names it

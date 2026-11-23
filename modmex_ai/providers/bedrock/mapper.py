@@ -113,6 +113,11 @@ def to_converse_payload(
             }
         }
     _apply_settings(payload, request)
+    if request.output_schema and is_openai(target):
+        # OpenAI model cards: Converse JSON Schema output also needs
+        # additionalModelRequestFields.text.format.strict = true.
+        fields = payload.setdefault("additionalModelRequestFields", {})
+        fields.setdefault("text", {}).setdefault("format", {}).setdefault("strict", True)
     return payload
 
 

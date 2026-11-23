@@ -404,3 +404,13 @@ def test_anthropic_adapter_on_bedrock_rejects_unsupported_features():
     with pytest.raises(ValueError, match="bytes"):
         model.complete(ModelRequest(messages=[Message(role="user", content=[
             TextInput(text="x"), ImageInput(url="https://cdn.example.com/a.png")])]))
+
+
+def test_openai_structured_output_adds_the_strict_text_format_field():
+    schema = {"title": "Out", "type": "object", "properties": {"x": {"type": "string"}}}
+    gpt = _payload([Message(role="user", content="x")], model="us.openai.gpt-6.1-terra", output_schema=schema,
+                   settings=ModelSettings(bedrock=BedrockSettings(additional_model_request_fields={"reasoning": {"effort": "low"}})))
+    assert gpt["additionalModelRequestFields"] == {"reasoning": {"effort": "low"}, "text": {"format": {"strict": True}}}
+    assert "outputConfig" in gpt
+    claude = _payload([Message(role="user", content="x")], output_schema=schema)
+    assert "additionalModelRequestFields" not in claude
