@@ -51,3 +51,17 @@ Both replies are written to `.examples/output/` (ignored by git) so you can list
 MODMEX_AI_RUN_LIVE=1 OPENAI_API_KEY=... ANTHROPIC_API_KEY=... \
     poetry run python .examples/voice/claude_openai.py
 ```
+
+## Amazon Bedrock
+
+`bedrock/smoke.py` runs the same checks (text, tools, structured output,
+streaming, image, PDF, optional `s3://` PDF) on each model you list, prints a
+compatibility matrix, and probes how large a PDF GPT (Responses API) and Claude
+(Converse) accept on Bedrock. Credentials come from the AWS chain (profile, SSO,
+env); copy model ids from each model card in the Bedrock console.
+
+```bash
+MODMEX_AI_RUN_LIVE=1 AWS_PROFILE=... AWS_REGION=us-west-2 \
+BEDROCK_MODELS="<id>,<id>" BEDROCK_OPENAI_MODEL="<GPT id>" \
+    poetry run python .examples/bedrock/smoke.py
+```
