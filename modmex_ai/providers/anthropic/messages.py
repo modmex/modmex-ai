@@ -46,6 +46,7 @@ class AnthropicMessagesModel(HttpModel):
         base_url: str = "https://api.anthropic.com/v1",
         http_client: HttpClient | None = None,
         async_http_client: AsyncHttpClient | None = None,
+        auth: Any = None,
         api_version: str = API_VERSION,
         default_headers: dict[str, str] | None = None,
     ) -> None:
@@ -54,8 +55,12 @@ class AnthropicMessagesModel(HttpModel):
             base_url=base_url,
             http_client=http_client,
             async_http_client=async_http_client,
+            auth=auth,
         )
-        self.api_key = api_key if api_key is not None else os.environ.get("ANTHROPIC_API_KEY")
+        # With a request signer (e.g. AwsSigV4 for Bedrock) never pick up an
+        # Anthropic key from the environment and send it to another service.
+        env_key = None if auth is not None else os.environ.get("ANTHROPIC_API_KEY")
+        self.api_key = api_key if api_key is not None else env_key
         self.api_version = api_version
         self.default_headers = dict(default_headers or {})
         self.profile = ANTHROPIC_MESSAGES_PROFILE
@@ -73,7 +78,10 @@ class AnthropicMessagesModel(HttpModel):
         return headers
 
     def _payload(self, request: ModelRequest, *, stream: bool) -> dict[str, Any]:
-        return to_messages_payload(request, self.model, stream=stream)
+        payload = to_messages_payload(request, self.model, stream=stream)
+        if "bedrock" in self.base_url:
+            _check_bedrock_support(payload)
+        return payload
 
     def _parse(self, body, *, headers, status_code, payload) -> ModelResponse:
         return from_messages_payload(
@@ -101,3 +109,21 @@ class AnthropicMessagesModel(HttpModel):
             model=self.model,
             binding=binding_digest(payload),
         )
+
+
+def _check_bedrock_support(payload: dict[str, Any]) -> None:
+    """Fail early on features Claude in Amazon Bedrock does not offer."""
+    if "fallbacks" in payload:
+        raise ValueError(
+            "Server-side fallbacks are not available on Amazon Bedrock; "
+            "wrap the models in FallbackModel instead"
+        )
+    for message in payload.get("messages", []):
+        content = message.get("content")
+        for block in content if isinstance(content, list) else []:
+            source = block.get("source") if isinstance(block, dict) else None
+            if isinstance(source, dict) and source.get("type") in {"url", "file"}:
+                raise ValueError(
+                    "Amazon Bedrock does not fetch URLs or Files API ids; "
+                    "pass images and documents as bytes"
+                )

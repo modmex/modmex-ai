@@ -28,6 +28,7 @@ _EXPORTS: dict[str, str] = {
     'RunContext': 'modmex_ai.agents',
     'prompt_with_handoff_instructions': 'modmex_ai.agents',
     'AnthropicSettings': 'modmex_ai.models',
+    'BedrockSettings': 'modmex_ai.models',
     'AsyncModelClient': 'modmex_ai.models',
     'FakeModel': 'modmex_ai.models',
     'FallbackModel': 'modmex_ai.models',
@@ -125,6 +126,7 @@ _EXPORTS: dict[str, str] = {
 
 __all__ = [
     "AnthropicSettings",
+    "BedrockSettings",
     "OpenAISettings",
     "ContextCompactor",
     "CompactionResult",
@@ -271,6 +273,7 @@ if TYPE_CHECKING:  # static analysis and IDE completion see the real symbols
     )
     from modmex_ai.models import (
         AnthropicSettings,
+        BedrockSettings,
         AsyncModelClient,
         FakeModel,
         FallbackModel,

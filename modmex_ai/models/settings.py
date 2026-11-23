@@ -42,9 +42,29 @@ class AnthropicSettings(BaseModel):
         super().__post_init__()
 
 
+class BedrockSettings(BaseModel):
+    """Amazon Bedrock Converse options that have no provider-neutral equivalent."""
+
+    # Prompt caching with cachePoint blocks (after the system prompt and at the
+    # end of the conversation). Only some models support it; check the model card.
+    cache_ttl: Literal["5m", "1h"] | None = None
+    # Model-specific parameters, sent as additionalModelRequestFields (e.g. a
+    # model's reasoning/effort options).
+    additional_model_request_fields: dict | None = None
+    # Bedrock Guardrails applied to the request.
+    guardrail_identifier: str | None = None
+    guardrail_version: str | None = None
+
+    def __post_init__(self) -> None:
+        if (self.guardrail_identifier is None) != (self.guardrail_version is None):
+            raise ValueError("guardrail_identifier and guardrail_version go together")
+        super().__post_init__()
+
+
 class ModelSettings(BaseModel):
     openai: OpenAISettings | None = None
     anthropic: AnthropicSettings | None = None
+    bedrock: BedrockSettings | None = None
     parallel_tool_calls: bool | None = None
     reasoning_effort: str | None = None
     temperature: float | None = None
