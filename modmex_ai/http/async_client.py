@@ -12,7 +12,7 @@ from modmex_ai.errors import (
     RunTimeoutError,
 )
 from modmex_ai.budget import bounded_timeout, bounded_await
-from modmex_ai.http.client import HttpResponse, encode_json_body
+from modmex_ai.http.client import HttpResponse, encode_json_body, provider_error_message
 from modmex_ai.http.retries import RetryConfig
 
 
@@ -213,7 +213,7 @@ def _provider_error(error: Exception) -> ProviderError:
             body = response.text
         error_cls = RateLimitError if response.status_code == 429 else ProviderError
         return error_cls(
-            f"Provider returned HTTP {response.status_code}",
+            provider_error_message(response.status_code, dict(response.headers), body),
             status_code=response.status_code,
             request_id=response.headers.get("x-request-id")
             or response.headers.get("request-id"),

@@ -194,8 +194,9 @@ signing with temporary credentials.
 **IAM.** Converse needs `bedrock:InvokeModel` (and
 `bedrock:InvokeModelWithResponseStream` for streaming) on the inference profile
 and the models it routes to; `bedrock-mantle` needs `bedrock-mantle:CreateInference`.
-`s3:GetObject` on the bucket for `s3://` inputs. Request access to each model in
-the Bedrock console first.
+`s3:GetObject` on the bucket for `s3://` inputs. AWS enables serverless
+foundation models automatically in commercial regions; if a call is denied, the
+error message carries AWS's error type and reason (e.g. the missing action).
 
 **Files.** Bedrock does not fetch URLs and has no Files API: images and
 documents travel as bytes. Pass `ImageInput(url="s3://...")` /

@@ -23,6 +23,7 @@ run tells you what each model supports with your account and region.
 
 from __future__ import annotations
 
+import json
 import os
 import struct
 import sys
@@ -163,8 +164,13 @@ def run_check(name, fn, *args):
     try:
         detail = fn(*args)
         status = "ok  "
+    except ValueError as exc:
+        if isinstance(exc, json.JSONDecodeError):
+            detail, status = f"{type(exc).__name__}: {str(exc)[:300]}", "FAIL"
+        else:  # modmex-ai rejected an input this model/endpoint does not support
+            detail, status = str(exc)[:300], "n/a "
     except Exception as exc:  # noqa: BLE001 - report and continue
-        detail = f"{type(exc).__name__}: {str(exc)[:160]}"
+        detail = f"{type(exc).__name__}: {str(exc)[:300]}"
         status = "FAIL"
     print(f"    {status} {name:11s} ({time.perf_counter() - started:5.1f}s) {detail}")
     return status == "ok  "
@@ -192,6 +198,13 @@ def main() -> None:
     if not models and not openai_model:
         raise SystemExit("Set BEDROCK_MODELS (comma-separated ids from the model cards) and/or BEDROCK_OPENAI_MODEL.")
     print(f"region: {REGION} | auth: {'Bedrock API key' if API_KEY else 'SigV4 (AWS credential chain)'}")
+    if not API_KEY:
+        try:  # who is signing: the first thing to check on a 403
+            signer = AwsSigV4(region=REGION)
+            identity = signer.session().create_client("sts", region_name=REGION).get_caller_identity()
+            print(f"identity: {identity['Arn']} (account {identity['Account']})")
+        except Exception as exc:  # noqa: BLE001
+            print(f"identity: could not resolve AWS credentials ({type(exc).__name__}: {exc})")
 
     for model_id in models:
         print(f"\n  Converse: {model_id}")

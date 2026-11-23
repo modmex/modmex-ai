@@ -536,3 +536,18 @@ def test_sync_client_sends_pre_encoded_bodies_unchanged():
     assert encode_json_body({"a": 1}) == b'{"a":1}'
     assert encode_json_body(b'{"keep": "as is"}') == b'{"keep": "as is"}'
     assert encode_json_body(None) == b"{}"
+
+
+def test_provider_error_message_keeps_the_providers_reason():
+    from modmex_ai.http.client import provider_error_message
+
+    aws = provider_error_message(
+        403,
+        {"x-amzn-ErrorType": "AccessDeniedException:http://internal.amazon.com/coral/com.amazon.bedrock/"},
+        {"message": "User: arn:aws:iam::1:user/dev is not authorized to perform: bedrock:InvokeModel"},
+    )
+    assert aws == ("Provider returned HTTP 403: AccessDeniedException: User: arn:aws:iam::1:user/dev "
+                   "is not authorized to perform: bedrock:InvokeModel")
+    openai = provider_error_message(401, {}, {"error": {"message": "Incorrect API key", "type": "invalid_request_error"}})
+    assert openai == "Provider returned HTTP 401: Incorrect API key"
+    assert provider_error_message(502, {}, "") == "Provider returned HTTP 502"

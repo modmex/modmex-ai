@@ -28,6 +28,32 @@ def encode_json_body(data: dict[str, Any] | bytes | None) -> bytes:
     return json.dumps(data or {}, separators=(",", ":")).encode("utf-8")
 
 
+def provider_error_message(status: int, headers: dict[str, str], body: Any) -> str:
+    """"Provider returned HTTP 403: AccessDeniedException: <provider message>".
+
+    The provider's own error type and message are what explain a failure (wrong
+    credentials, missing permission, invalid model id); keep them in the
+    exception text instead of only the status code.
+    """
+    parts = [f"Provider returned HTTP {status}"]
+    error_type = next((v for k, v in headers.items() if k.lower() == "x-amzn-errortype"), None)
+    if error_type:
+        parts.append(error_type.split(":", 1)[0])
+    message = None
+    if isinstance(body, dict):
+        error = body.get("error")
+        message = body.get("message") or body.get("Message")
+        if message is None and isinstance(error, dict):
+            message = error.get("message") or error.get("type")
+        elif message is None and isinstance(error, str):
+            message = error
+    elif isinstance(body, str) and body.strip():
+        message = body.strip()
+    if message:
+        parts.append(" ".join(str(message).split())[:300])
+    return ": ".join(parts)
+
+
 class HttpResponse(BaseModel):
     status_code: int
     headers: dict[str, str]
@@ -188,7 +214,7 @@ class HttpClient:
             request_id = headers.get("x-request-id") or headers.get("request-id")
             error_cls = RateLimitError if exc.code == 429 else ProviderError
             raise error_cls(
-                f"Provider returned HTTP {exc.code}",
+                provider_error_message(exc.code, headers, body),
                 status_code=exc.code,
                 request_id=request_id,
                 response_body=body,
@@ -284,7 +310,7 @@ def _provider_error_from_http_error(error: urllib.error.HTTPError) -> ProviderEr
     request_id = headers.get("x-request-id") or headers.get("request-id")
     error_cls = RateLimitError if error.code == 429 else ProviderError
     return error_cls(
-        f"Provider returned HTTP {error.code}",
+        provider_error_message(error.code, headers, body),
         status_code=error.code,
         request_id=request_id,
         response_body=body,
