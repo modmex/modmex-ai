@@ -20,6 +20,14 @@ from modmex_ai.http.retries import RetryConfig
 from modmex_ai.budget import bounded_timeout, remaining_seconds
 
 
+def encode_json_body(data: dict[str, Any] | bytes | None) -> bytes:
+    """JSON request body. Pre-encoded bytes are sent as-is (e.g. a body that was
+    signed with SigV4 must reach the wire byte-for-byte)."""
+    if isinstance(data, (bytes, bytearray)):
+        return bytes(data)
+    return json.dumps(data or {}, separators=(",", ":")).encode("utf-8")
+
+
 class HttpResponse(BaseModel):
     status_code: int
     headers: dict[str, str]
@@ -47,10 +55,10 @@ class HttpClient:
         url: str,
         *,
         headers: dict[str, str] | None = None,
-        data: dict[str, Any] | None = None,
+        data: dict[str, Any] | bytes | None = None,
         timeout: float | None = None,
     ) -> HttpResponse:
-        payload = json.dumps(data or {}, separators=(",", ":")).encode("utf-8")
+        payload = encode_json_body(data)
         request = urllib.request.Request(
             url,
             data=payload,
@@ -84,10 +92,10 @@ class HttpClient:
         url: str,
         *,
         headers: dict[str, str] | None = None,
-        data: dict[str, Any] | None = None,
+        data: dict[str, Any] | bytes | None = None,
         timeout: float | None = None,
     ) -> HttpResponse:
-        payload = json.dumps(data or {}, separators=(",", ":")).encode("utf-8")
+        payload = encode_json_body(data)
         request = urllib.request.Request(
             url,
             data=payload,
@@ -105,12 +113,12 @@ class HttpClient:
         url: str,
         *,
         headers: dict[str, str] | None = None,
-        data: dict[str, Any] | None = None,
+        data: dict[str, Any] | bytes | None = None,
         chunk_size: int = 8_192,
         timeout: float | None = None,
     ) -> Iterator[bytes]:
         """Yield a chunked binary HTTP response without buffering it in memory."""
-        payload = json.dumps(data or {}, separators=(",", ":")).encode("utf-8")
+        payload = encode_json_body(data)
         request = urllib.request.Request(
             url,
             data=payload,

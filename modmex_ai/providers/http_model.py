@@ -35,10 +35,15 @@ class HttpModel(AsyncModelClient):
         base_url: str,
         http_client: HttpClient | None = None,
         async_http_client: AsyncHttpClient | None = None,
+        auth: Any = None,
     ) -> None:
         self.name = model
         self.model = model
         self.base_url = base_url.rstrip("/")
+        #: Optional request signer with ``sign(method, url, headers, body) ->
+        #: headers`` (e.g. ``modmex_ai.aws.AwsSigV4``). When set, the body is
+        #: encoded once and that exact byte string is signed and sent.
+        self.auth = auth
         self.http_client = http_client or HttpClient(
             retry=self.default_retry(), timeout=self.default_timeout
         )
@@ -72,6 +77,34 @@ class HttpModel(AsyncModelClient):
     def _aevents(self, payloads: AsyncIterator[dict[str, Any]], *, payload: dict[str, Any]):
         raise NotImplementedError
 
+    def _endpoint(self, request: ModelRequest, *, stream: bool) -> str:
+        """URL for this request; most adapters post everything to one path."""
+        return self._url
+
+    def _decode_stream(self, chunks: Iterator[bytes]) -> Iterator[dict[str, Any]]:
+        """Turn the raw streaming body into event dicts (SSE by default)."""
+        return parse_sse_lines(chunks)
+
+    def _adecode_stream(self, chunks: AsyncIterator[bytes]) -> AsyncIterator[dict[str, Any]]:
+        return parse_sse_lines_async(chunks)
+
+    def _prepare(
+        self, request: ModelRequest, *, stream: bool
+    ) -> tuple[str, dict[str, str], dict[str, Any], dict[str, Any] | bytes]:
+        """Build (url, headers, payload, wire body), signing it when ``auth`` is set."""
+        payload = self._payload(request, stream=stream)
+        url = self._endpoint(request, stream=stream)
+        headers = self._headers(request)
+        if self.auth is None:
+            return url, headers, payload, payload
+        from modmex_ai.http.client import encode_json_body
+
+        body = encode_json_body(payload)
+        signed = self.auth.sign(
+            "POST", url, {"content-type": "application/json", **headers}, body
+        )
+        return url, signed, payload, body
+
     # -- execution modes ------------------------------------------------------
 
     @property
@@ -79,12 +112,9 @@ class HttpModel(AsyncModelClient):
         return f"{self.base_url}{self.path}"
 
     def complete(self, request: ModelRequest) -> ModelResponse:
-        payload = self._payload(request, stream=False)
+        url, headers, payload, body = self._prepare(request, stream=False)
         response = self.http_client.post_json(
-            self._url,
-            headers=self._headers(request),
-            data=payload,
-            timeout=_timeout(request),
+            url, headers=headers, data=body, timeout=_timeout(request)
         )
         return self._parse(
             response.body,
@@ -98,12 +128,9 @@ class HttpModel(AsyncModelClient):
             import asyncio
 
             return await asyncio.to_thread(self.complete, request)
-        payload = self._payload(request, stream=False)
+        url, headers, payload, body = self._prepare(request, stream=False)
         response = await self.async_http_client.post_json(
-            self._url,
-            headers=self._headers(request),
-            data=payload,
-            timeout=_timeout(request),
+            url, headers=headers, data=body, timeout=_timeout(request)
         )
         return self._parse(
             response.body,
@@ -113,25 +140,19 @@ class HttpModel(AsyncModelClient):
         )
 
     def stream(self, request: ModelRequest):
-        payload = self._payload(request, stream=True)
+        url, headers, payload, body = self._prepare(request, stream=True)
         chunks = self.http_client.post_json_stream(
-            self._url,
-            headers=self._headers(request),
-            data=payload,
-            timeout=_timeout(request),
+            url, headers=headers, data=body, timeout=_timeout(request)
         )
-        yield from self._events(parse_sse_lines(chunks), payload=payload)
+        yield from self._events(self._decode_stream(chunks), payload=payload)
 
     async def astream(self, request: ModelRequest):
         if self.async_http_client is not None:
-            payload = self._payload(request, stream=True)
+            url, headers, payload, body = self._prepare(request, stream=True)
             chunks = self.async_http_client.post_json_stream(
-                self._url,
-                headers=self._headers(request),
-                data=payload,
-                timeout=_timeout(request),
+                url, headers=headers, data=body, timeout=_timeout(request)
             )
-            async for event in self._aevents(parse_sse_lines_async(chunks), payload=payload):
+            async for event in self._aevents(self._adecode_stream(chunks), payload=payload):
                 yield event
             return
         import asyncio

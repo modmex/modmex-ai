@@ -12,7 +12,7 @@ from modmex_ai.errors import (
     RunTimeoutError,
 )
 from modmex_ai.budget import bounded_timeout, bounded_await
-from modmex_ai.http.client import HttpResponse
+from modmex_ai.http.client import HttpResponse, encode_json_body
 from modmex_ai.http.retries import RetryConfig
 
 
@@ -66,7 +66,7 @@ class AsyncHttpClient:
         url: str,
         *,
         headers: dict[str, str] | None = None,
-        data: dict[str, Any] | None = None,
+        data: dict[str, Any] | bytes | None = None,
         timeout: float | None = None,
         raise_for_status: bool = True,
         retry: RetryConfig | None = None,
@@ -88,7 +88,7 @@ class AsyncHttpClient:
         url: str,
         *,
         headers: dict[str, str] | None = None,
-        data: dict[str, Any] | None = None,
+        data: dict[str, Any] | bytes | None = None,
         chunk_size: int = 8_192,
         timeout: float | None = None,
         retry: RetryConfig | None = None,
@@ -110,7 +110,7 @@ class AsyncHttpClient:
         url: str,
         *,
         headers: dict[str, str] | None,
-        data: dict[str, Any] | None,
+        data: dict[str, Any] | bytes | None,
         timeout: float | None,
         stream: bool,
         raise_for_status: bool = True,
@@ -118,6 +118,8 @@ class AsyncHttpClient:
     ) -> AsyncIterator[Any]:
         import asyncio
         policy = retry or self.retry
+        # httpx only sets this for json=; the body is now always pre-encoded.
+        headers = {"content-type": "application/json", **(headers or {})}
         client = await self._get_client()
         emitted = False
         for attempt in range(policy.attempts + 1):
@@ -127,7 +129,7 @@ class AsyncHttpClient:
                         "POST",
                         url,
                         headers=headers,
-                        json=data,
+                        content=encode_json_body(data),
                         timeout=bounded_timeout(
                             timeout if timeout is not None else self.timeout
                         ),
@@ -140,7 +142,7 @@ class AsyncHttpClient:
                     response = await client.post(
                         url,
                         headers=headers,
-                        json=data,
+                        content=encode_json_body(data),
                         timeout=bounded_timeout(
                             timeout if timeout is not None else self.timeout
                         ),

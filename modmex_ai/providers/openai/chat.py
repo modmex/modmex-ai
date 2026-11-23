@@ -25,12 +25,14 @@ class OpenAIChatModel(HttpModel):
         base_url: str = "https://api.openai.com/v1",
         http_client: HttpClient | None = None,
         async_http_client: AsyncHttpClient | None = None,
+        auth: Any = None,
     ) -> None:
         super().__init__(
             model,
             base_url=base_url,
             http_client=http_client,
             async_http_client=async_http_client,
+            auth=auth,
         )
         self.api_key = api_key
         self.profile = OPENAI_CHAT_PROFILE
