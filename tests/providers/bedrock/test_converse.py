@@ -17,6 +17,13 @@ from tests.aws.sigv4_reference import verify
 
 SECRET = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
 
+# Signing and the AWS event-stream decoder use botocore (the `aws` extra; part of
+# the Lambda runtime). Without it these tests are skipped, not failed.
+needs_botocore = pytest.mark.skipif(
+    __import__("importlib.util").util.find_spec("botocore") is None,
+    reason="botocore not installed (pip install 'modmex-ai[aws]')",
+)
+
 
 @pytest.fixture(autouse=True)
 def aws_env(monkeypatch):
@@ -54,6 +61,7 @@ def _payload(messages, model="us.anthropic.claude-opus-5-5", load_s3=None, **kwa
 # --- signing -----------------------------------------------------------------
 
 
+@needs_botocore
 def test_requests_are_sigv4_signed_over_the_exact_bytes_sent():
     http = FakeHttp(_reply([{"text": "hola"}]))
     model = BedrockConverseModel("us.anthropic.claude-opus-5-5:0", http_client=http)
@@ -82,6 +90,7 @@ def test_bedrock_api_key_uses_bearer_instead_of_signing():
         BedrockConverseModel("m", api_key="k", auth=object())
 
 
+@needs_botocore
 def test_openai_and_anthropic_adapters_sign_when_given_auth():
     from modmex_ai.aws import AwsSigV4
     from modmex_ai.providers.anthropic import AnthropicMessagesModel
@@ -303,6 +312,7 @@ STREAM = b"".join([
 ])
 
 
+@needs_botocore
 def test_converse_stream_decodes_binary_events_and_rebuilds_the_turn():
     model = BedrockConverseModel("us.anthropic.claude-opus-5-5", api_key="k", http_client=FakeHttp(stream=STREAM))
     events = list(model.stream(ModelRequest(messages=[Message(role="user", content="hi")])))
@@ -319,6 +329,7 @@ def test_converse_stream_decodes_binary_events_and_rebuilds_the_turn():
     assert model.http_client.calls[0]["url"].endswith("/converse-stream")
 
 
+@needs_botocore
 def test_stream_exception_frames_raise_typed_errors():
     stream = _frame("messageStart", {"role": "assistant"}) + _frame(
         "throttlingException", {"message": "Too many requests"}, message_type="exception")
@@ -327,6 +338,7 @@ def test_stream_exception_frames_raise_typed_errors():
         list(model.stream(ModelRequest(messages=[Message(role="user", content="hi")])))
 
 
+@needs_botocore
 def test_async_stream_uses_the_same_decoder():
     class AsyncFake:
         async def post_json_stream_gen(self):
