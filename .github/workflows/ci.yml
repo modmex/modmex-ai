@@ -28,7 +28,7 @@ jobs:
         run: pip install poetry
 
       - name: Install dependencies
-        run: poetry install --extras async
+        run: poetry install --extras "async aws"
 
       - name: Run tests
         run: poetry run pytest -q

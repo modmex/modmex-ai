@@ -488,9 +488,12 @@ def test_tool_call_is_not_retried_once_the_request_may_have_run(monkeypatch):
     sent = []
 
     class FakeClient:
-        async def post(self, url, *, headers, json, timeout):
-            sent.append(json["method"])
-            if json["method"] == "tools/call":
+        async def post(self, url, *, headers, content, timeout):
+            import json as _json
+
+            method = _json.loads(content)["method"]
+            sent.append(method)
+            if method == "tools/call":
                 raise httpx.ReadError("connection reset after send")
             raise httpx.ConnectError("refused")
 

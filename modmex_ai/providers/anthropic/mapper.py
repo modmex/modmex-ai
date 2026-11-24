@@ -175,8 +175,8 @@ def _apply_settings(
     settings = request.settings
     if not settings:
         return
-    if settings.openai is not None:
-        raise ValueError("OpenAI settings cannot be sent to Anthropic")
+    # settings.openai / settings.bedrock belong to other providers: ignored, so one request can
+    # go to any of them (FallbackModel, model_from with several names).
     if settings.temperature is not None or settings.top_p is not None:
         # API version 2026-10-21 rejects sampling parameters on every model.
         raise ValueError(

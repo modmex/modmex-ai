@@ -13,8 +13,9 @@ call tools, hand off work, and return a controlled result. It fits equally well
 in HTTP APIs, CLIs, background workers, WebSocket servers, notebooks, desktop
 applications, voice systems, and event-driven/serverless workloads.
 
-Its core has no provider SDK dependency. OpenAI and Anthropic (Claude) text
-adapters ship in the box, both on the built-in zero-dependency HTTP transport;
+Its core has no provider SDK dependency. OpenAI, Anthropic (Claude) and Amazon
+Bedrock (Converse, most catalog models) text adapters ship in the box, on the
+built-in zero-dependency HTTP transport;
 the core contracts remain reusable for another text, speech, or realtime
 provider.
 
@@ -83,6 +84,23 @@ Multi-agent delegation uses handoff function tools, not a field in the model
 output. A handoff defaults to transfer_to_agent_name; its typed input is
 validated and delivered to an on_handoff callback before the next agent
 continues with the conversation.
+
+## Choosing a model by name
+
+```python
+from modmex_ai import model_from
+
+model = model_from("anthropic:claude-sonnet-5-5")          # AnthropicMessagesModel
+model = model_from("openai:gpt-5.6-terra")                 # OpenAIResponsesModel
+model = model_from("bedrock:anthropic.claude-sonnet-5-5")  # BedrockConverseModel
+model = model_from("anthropic:claude-sonnet-5-5,openai:gpt-5.6-terra")  # FallbackModel, in order
+```
+
+Keys come from `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` (Bedrock signs with the AWS
+credential chain); in a list, a provider without its key is left out. Keyword
+options (`http_client`, `base_url`, `api_key`…) go to every client. Each provider
+ignores the other providers' settings, so one `ModelSettings(openai=…, anthropic=…)`
+serves any of them and a mixed fallback list.
 
 ## Anthropic (Claude)
 
@@ -153,6 +171,92 @@ Notes:
   codes and uses a 300 s timeout, which is still capped by the remaining
   execution budget.
 - Streaming (`run_stream`) is recommended for long or tool-heavy turns.
+
+## Amazon Bedrock
+
+Run text models from the Bedrock catalog with AWS IAM and AWS billing. Three
+adapters, one signing mechanism:
+
+| Adapter | Endpoint | Use it for |
+|---|---|---|
+| `BedrockConverseModel` | Converse (`bedrock-runtime`) | Most catalog models (Claude, GPT, Llama, Nova, Mistral, Qwen, DeepSeek…) with one request shape |
+| `OpenAIResponsesModel` / `OpenAIChatModel` | `https://bedrock-runtime.{region}.amazonaws.com/openai/v1` | GPT models with documents (`input_file`), or models without Converse |
+| `AnthropicMessagesModel` | `https://bedrock-mantle.{region}.api.aws/anthropic/v1` | Claude through the Messages API |
+
+```python
+from modmex_ai import Agent
+from modmex_ai.aws import AwsSigV4
+from modmex_ai.providers.bedrock import BedrockConverseModel
+from modmex_ai.providers.openai import OpenAIResponsesModel
+
+# Signs with the Lambda execution role (or a profile/SSO locally).
+claude = BedrockConverseModel("<inference profile id from the model card>", region="us-west-2")
+agent = Agent(name="ops", instructions="...", model=claude)
+
+gpt = OpenAIResponsesModel(
+    "<GPT inference profile id>",
+    base_url="https://bedrock-runtime.us-west-2.amazonaws.com/openai/v1",
+    auth=AwsSigV4(region="us-west-2", service="bedrock"),
+)
+```
+
+**Authentication.** `AwsSigV4` signs each request with botocore's credential
+chain (Lambda execution role, environment, profile, SSO); temporary credentials
+are refreshed automatically. botocore ships in the Lambda Python runtime and in
+the `aws` extra, and is imported only when a Bedrock request is made. The signing
+name is `"bedrock"` for `bedrock-runtime` and `"bedrock-mantle"` for
+`bedrock-mantle`. A Bedrock API key (`api_key=`) works too, but AWS recommends
+signing with temporary credentials.
+
+**IAM.** Converse needs `bedrock:InvokeModel` (and
+`bedrock:InvokeModelWithResponseStream` for streaming) on the inference profile
+and the models it routes to; `bedrock-mantle` needs `bedrock-mantle:CreateInference`.
+`s3:GetObject` on the bucket for `s3://` inputs. AWS enables serverless
+foundation models automatically in commercial regions; if a call is denied, the
+error message carries AWS's error type and reason (e.g. the missing action).
+
+**Files.** Bedrock does not fetch URLs and has no Files API: images and
+documents travel as bytes. Pass `ImageInput(url="s3://...")` /
+`FileInput(url="s3://...")` to keep only the reference in your session (DynamoDB
+items are limited to 400 KB); Amazon Nova reads the S3 object directly and other
+models receive its bytes, cached briefly per container. Converse documents need a
+format (`media_type` or a filename extension), a text block in the same message,
+at most 5 per request and 4.5 MB each (Claude 4+ PDFs: 32 MB request, 100 pages;
+Nova PDF/DOCX are exempt from the 4.5 MB limit). **GPT models reject Converse
+documents**: send PDFs to them with `OpenAIResponsesModel` on Bedrock. For large
+scanned PDFs (e.g. a 20 MB proof of delivery), rendering pages to compressed
+images first is cheaper and works with any model; the models downscale pages
+anyway.
+
+**Model ids.** On `bedrock-runtime` (Converse) many models are served only through
+an inference profile: use the `us.`/`global.` id from the model card's
+*Programmatic access* table, not the bare model id. A bare id that is not offered
+in-Region can come back as `AccessDeniedException: ... is not available for this
+account`.
+
+**Converse notes.**
+
+- Tools (`strict`), structured output, streaming and signed reasoning replay work
+  as with the native adapters; whether a given model supports documents, prompt
+  caching (`BedrockSettings(cache_ttl=...)`) or structured output depends on its
+  model card. Pass `supports_structured_output=False` for models without it.
+- OpenAI models: structured output also sets
+  `additionalModelRequestFields.text.format.strict` (done for you).
+- Model-specific parameters (e.g. reasoning effort) go in
+  `BedrockSettings(additional_model_request_fields=...)`;
+  `ModelSettings.reasoning_effort` is rejected because each family names it
+  differently. Bedrock Guardrails: `guardrail_identifier` / `guardrail_version`.
+- Converse has no mid-conversation system role: later system/developer messages
+  (`turn_context`) are sent as user text.
+- `content_filtered` raises `ModelRefusalError`; context overflow and malformed
+  output raise `ProviderError`.
+
+**OpenAI Responses on Bedrock** (per AWS): requests are synchronous, `model` is
+required on every request (the adapter always sends it), stored responses belong
+to the region that served them, only the default project is supported, and
+server-side tools are unavailable. **Claude through `bedrock-mantle`** has no
+server-side `fallbacks` (use `FallbackModel`), URL sources or Files API; the
+adapter rejects them early.
 
 ## Multimodal inputs
 

@@ -489,3 +489,65 @@ def test_async_http_client_recreates_owned_transport_on_a_new_event_loop(monkeyp
     asyncio.run(call())  # invocation 1: one pooled client, reused within the loop
     asyncio.run(call())  # invocation 2: new loop -> new pooled client
     assert len(created) == 2
+
+
+def test_async_client_sends_pre_encoded_bodies_with_json_content_type(monkeypatch):
+    import modmex_ai.http.async_client as module
+
+    sent = []
+
+    class Response:
+        status_code = 200
+        headers = {}
+        content = b"{}"
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {}
+
+    class FakeAsyncClient:
+        def __init__(self, timeout):
+            pass
+
+        async def post(self, url, *, headers, content, timeout):
+            sent.append((headers, content))
+            return Response()
+
+    class FakeHttpx:
+        AsyncClient = FakeAsyncClient
+
+    monkeypatch.setattr(module, "_httpx", lambda: FakeHttpx)
+    client = AsyncHttpClient()
+
+    async def run():
+        await client.post_json("https://example.test", data={"a": 1})
+        await client.post_json("https://example.test", data=b'{"signed":true}', headers={"x-amz-date": "d"})
+
+    asyncio.run(run())
+    assert sent[0] == ({"content-type": "application/json"}, b'{"a":1}')
+    assert sent[1] == ({"content-type": "application/json", "x-amz-date": "d"}, b'{"signed":true}')
+
+
+def test_sync_client_sends_pre_encoded_bodies_unchanged():
+    from modmex_ai.http.client import encode_json_body
+
+    assert encode_json_body({"a": 1}) == b'{"a":1}'
+    assert encode_json_body(b'{"keep": "as is"}') == b'{"keep": "as is"}'
+    assert encode_json_body(None) == b"{}"
+
+
+def test_provider_error_message_keeps_the_providers_reason():
+    from modmex_ai.http.client import provider_error_message
+
+    aws = provider_error_message(
+        403,
+        {"x-amzn-ErrorType": "AccessDeniedException:http://internal.amazon.com/coral/com.amazon.bedrock/"},
+        {"message": "User: arn:aws:iam::1:user/dev is not authorized to perform: bedrock:InvokeModel"},
+    )
+    assert aws == ("Provider returned HTTP 403: AccessDeniedException: User: arn:aws:iam::1:user/dev "
+                   "is not authorized to perform: bedrock:InvokeModel")
+    openai = provider_error_message(401, {}, {"error": {"message": "Incorrect API key", "type": "invalid_request_error"}})
+    assert openai == "Provider returned HTTP 401: Incorrect API key"
+    assert provider_error_message(502, {}, "") == "Provider returned HTTP 502"

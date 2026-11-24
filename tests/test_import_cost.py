@@ -6,7 +6,7 @@ import sys
 import pytest
 
 
-HEAVY = ["asyncio", "modmex_ai.voice", "modmex_ai.realtime", "modmex_ai.flows", "modmex_ai.evals", "modmex_ai.context"]
+HEAVY = ["botocore", "asyncio", "modmex_ai.voice", "modmex_ai.realtime", "modmex_ai.flows", "modmex_ai.evals", "modmex_ai.context"]
 
 
 @pytest.mark.parametrize(
@@ -15,6 +15,7 @@ HEAVY = ["asyncio", "modmex_ai.voice", "modmex_ai.realtime", "modmex_ai.flows", 
         "from modmex_ai import Agent, tool, ModelSettings",
         "from modmex_ai import Agent; from modmex_ai.providers.anthropic import AnthropicMessagesModel",
         "from modmex_ai import Agent; from modmex_ai.providers.openai import OpenAIResponsesModel, OpenAIChatModel",
+        "from modmex_ai import Agent; from modmex_ai.providers.bedrock import BedrockConverseModel",
     ],
 )
 def test_sync_agent_imports_stay_light(imports):

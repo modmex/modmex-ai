@@ -149,12 +149,17 @@ def test_fallback_list_and_betas():
         (ModelSettings(temperature=0.2), "temperature"),
         (ModelSettings(top_p=0.9), "temperature"),
         (ModelSettings(reasoning_effort="minimal"), "reasoning_effort"),
-        (ModelSettings(openai=OpenAISettings(prompt_cache_key="k")), "OpenAI"),
     ],
 )
 def test_rejected_settings(settings, message):
     with pytest.raises(ValueError, match=message):
         _payload(messages=[Message(role="user", content="x")], settings=settings)
+
+
+def test_other_providers_settings_are_ignored():
+    payload = _payload(messages=[Message(role="user", content="x")],
+                       settings=ModelSettings(openai=OpenAISettings(prompt_cache_key="k"), max_tokens=100))
+    assert "prompt_cache_key" not in payload and payload["max_tokens"] == 100
 
 
 def test_remote_provider_state_rejected():
