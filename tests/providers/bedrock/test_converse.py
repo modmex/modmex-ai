@@ -149,8 +149,9 @@ def test_reasoning_effort_and_foreign_settings_are_rejected_with_guidance():
 
     with pytest.raises(ValueError, match="additional_model_request_fields"):
         _payload([Message(role="user", content="x")], settings=ModelSettings(reasoning_effort="high"))
-    with pytest.raises(ValueError, match="BedrockSettings"):
-        _payload([Message(role="user", content="x")], settings=ModelSettings(openai=OpenAISettings(prompt_cache_key="k")))
+    # Another provider's settings are ignored (one request may go to several providers).
+    payload = _payload([Message(role="user", content="x")], settings=ModelSettings(openai=OpenAISettings(prompt_cache_key="k")))
+    assert "prompt_cache_key" not in str(payload)
 
 
 def test_mid_conversation_instructions_become_user_text():

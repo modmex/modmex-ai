@@ -85,6 +85,23 @@ output. A handoff defaults to transfer_to_agent_name; its typed input is
 validated and delivered to an on_handoff callback before the next agent
 continues with the conversation.
 
+## Choosing a model by name
+
+```python
+from modmex_ai import model_from
+
+model = model_from("anthropic:claude-sonnet-5-5")          # AnthropicMessagesModel
+model = model_from("openai:gpt-5.6-terra")                 # OpenAIResponsesModel
+model = model_from("bedrock:anthropic.claude-sonnet-5-5")  # BedrockConverseModel
+model = model_from("anthropic:claude-sonnet-5-5,openai:gpt-5.6-terra")  # FallbackModel, in order
+```
+
+Keys come from `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` (Bedrock signs with the AWS
+credential chain); in a list, a provider without its key is left out. Keyword
+options (`http_client`, `base_url`, `api_key`…) go to every client. Each provider
+ignores the other providers' settings, so one `ModelSettings(openai=…, anthropic=…)`
+serves any of them and a mixed fallback list.
+
 ## Anthropic (Claude)
 
 `AnthropicMessagesModel` calls `POST /v1/messages` through the same

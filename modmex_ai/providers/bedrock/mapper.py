@@ -153,11 +153,7 @@ def _apply_settings(payload: dict[str, Any], request: ModelRequest) -> None:
     settings = request.settings
     if not settings:
         return
-    if settings.openai is not None or settings.anthropic is not None:
-        raise ValueError(
-            "OpenAI/Anthropic settings cannot be sent through Bedrock Converse; "
-            "use BedrockSettings"
-        )
+    # settings.openai / settings.anthropic belong to other providers: ignored (see the Anthropic mapper).
     if settings.reasoning_effort is not None:
         # Each model family names this differently; guessing would send a field
         # the model rejects or silently ignores.

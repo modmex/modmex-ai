@@ -7,6 +7,7 @@ from modmex_ai.models.request import ModelRequest
 from modmex_ai.models.response import ModelResponse, ToolCall
 from modmex_ai.models.stream import ModelStreamEvent, ModelStreamEventType
 from modmex_ai.models.settings import AnthropicSettings, BedrockSettings, ModelSettings, OpenAISettings
+from modmex_ai.models.spec import model_from
 from modmex_ai.models.usage import Usage
 
 __all__ = [
@@ -26,4 +27,5 @@ __all__ = [
     "ProviderState",
     "ToolCall",
     "Usage",
+    "model_from",
 ]
