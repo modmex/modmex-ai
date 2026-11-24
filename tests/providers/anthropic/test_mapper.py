@@ -95,6 +95,15 @@ def test_non_strict_tools_send_schema_as_is():
     assert payload["tools"][0] == {"name": "t", "input_schema": params}
 
 
+def test_past_the_strict_tool_limit_every_tool_goes_with_its_plain_schema():
+    params = {"type": "object", "properties": {"a": {"type": "integer", "minimum": 0}}}
+    tools = [{"name": f"t{n}", "description": "", "parameters": params} for n in range(21)]
+    payload = _payload(messages=[Message(role="user", content="x")], tools=tools)
+    assert all("strict" not in tool and tool["input_schema"] == params for tool in payload["tools"])
+    payload = _payload(messages=[Message(role="user", content="x")], tools=tools[:20])
+    assert all(tool["strict"] is True for tool in payload["tools"])
+
+
 def test_nested_schema_normalization():
     schema = {
         "type": "object",

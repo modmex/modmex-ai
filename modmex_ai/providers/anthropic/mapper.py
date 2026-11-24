@@ -37,6 +37,7 @@ from modmex_ai.sessions import SessionItem
 
 PROVIDER = "anthropic"
 DEFAULT_MAX_TOKENS = 16_000
+MAX_STRICT_TOOLS = 20
 DEFAULT_STREAM_MAX_TOKENS = 64_000
 EFFORT_LEVELS = {"low", "medium", "high", "xhigh", "max"}
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
@@ -77,7 +78,10 @@ def to_messages_payload(
     if system:
         payload["system"] = system
     if request.tools:
-        payload["tools"] = [_tool_payload(request, tool) for tool in request.tools]
+        # The API accepts at most MAX_STRICT_TOOLS strict tools: past it, every tool goes with its
+        # plain schema (choosing which ones stay strict would be arbitrary).
+        strict = request.tool_strict and len(request.tools) <= MAX_STRICT_TOOLS
+        payload["tools"] = [_tool_payload(tool, strict) for tool in request.tools]
     _drop_stale_thinking(messages, replays, binding_digest(payload))
     output_config: dict[str, Any] = {}
     if request.output_schema:
@@ -156,12 +160,12 @@ def _check_provider_state(request: ModelRequest) -> None:
         )
 
 
-def _tool_payload(request: ModelRequest, tool: dict[str, Any]) -> dict[str, Any]:
+def _tool_payload(tool: dict[str, Any], strict: bool) -> dict[str, Any]:
     parameters = tool.get("parameters") or {"type": "object", "properties": {}}
     payload: dict[str, Any] = {"name": tool["name"]}
     if tool.get("description"):
         payload["description"] = tool["description"]
-    if request.tool_strict:
+    if strict:
         payload["input_schema"] = to_anthropic_schema(parameters)
         payload["strict"] = True
     else:
